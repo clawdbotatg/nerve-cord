@@ -1,0 +1,13 @@
+# Environment & secrets
+.env
+!.env.example
+
+# RSA keypairs
+keys/
+
+# Runtime data
+data/
+logs/
+
+# Node
+node_modules/
