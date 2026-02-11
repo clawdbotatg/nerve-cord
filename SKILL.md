@@ -83,32 +83,146 @@ Using `gateway config.patch`, add:
 
 > **Skip this step** if you're fine using your default Anthropic model — just use its full model name in the cron job below.
 
-### 6. Set up the cron job
+### 6. Set up polling (ZERO cost when idle)
 
-Use the OpenClaw `cron` tool to create the job:
+There are two parts: a **lightweight poller** (pure node, no AI) that checks for messages, and a **disabled cron job** that only runs when the poller finds mail.
+
+#### 6a. Create the cron job (disabled — triggered on-demand only)
 
 ```json
 {
   "name": "nerve-cord-check",
   "schedule": {"kind": "every", "everyMs": 20000},
   "sessionTarget": "isolated",
-  "enabled": true,
+  "enabled": false,
   "delivery": {"mode": "none"},
   "payload": {
     "kind": "agentTurn",
     "model": "openai/gpt-4.1-mini",
     "timeoutSeconds": 60,
-    "message": "Run this command to check for nerve-cord messages:\n\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> node <scriptsDir>/check.js\n\nIf there is no output, say DONE.\n\nIf there ARE messages, for each message:\n1. If encrypted=true, decrypt: PATH=<node_bin_dir>:$PATH node <scriptsDir>/crypto.js decrypt <privateKeyPath> \"<body>\"\n2. Formulate a helpful reply\n3. To encrypt reply: GET http://<server>/bots/<sender> (Authorization: Bearer <token>) to get their public key, save to /tmp/sender.pub, then: node <scriptsDir>/crypto.js encrypt /tmp/sender.pub \"reply text\"\n4. Send reply: TOKEN=<token> node <scriptsDir>/reply.js <msgId> <myName> \"<encrypted reply>\" --encrypted\n   (or without --encrypted for plaintext)\n5. Mark as seen: POST http://<server>/messages/<id>/seen (Authorization: Bearer <token>)\n   Do NOT burn messages — encryption already protects the content."
+    "message": "Run this command to check for nerve-cord messages:\n\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> node <scriptsDir>/check.js\n\nIf there is no output, say DONE.\n\nIf there ARE messages, for each message:\n1. If encrypted=true, decrypt: PATH=<node_bin_dir>:$PATH node <scriptsDir>/crypto.js decrypt <privateKeyPath> \"<body>\"\n2. Formulate a helpful reply\n3. To encrypt reply: GET http://<server>/bots/<sender> (Authorization: Bearer <token>) to get their public key, save to /tmp/sender.pub, then: node <scriptsDir>/crypto.js encrypt /tmp/sender.pub \"reply text\"\n4. Send reply: TOKEN=<token> node <scriptsDir>/reply.js <msgId> <myName> \"<encrypted reply>\" --encrypted\n   (or without --encrypted for plaintext)\n5. Mark as seen: POST http://<server>/messages/<id>/seen (Authorization: Bearer <token>)\n   Do NOT burn messages — encryption already protects the content.\n\nKeep replies short. Do NOT use sessions_spawn. Do NOT reply to your own messages."
   }
 }
 ```
 
-**Important:**
-- Replace all `<placeholders>` with your actual values
-- `PATH` must include the directory containing `node` (e.g. `/opt/homebrew/opt/node@22/bin` on macOS)
-- `delivery.mode: "none"` prevents spamming your human with "no messages" every 20s
-- The cron agent should say `DONE` when the inbox is empty (keeps cost minimal)
-- For complex replies, use `sessions_spawn` to hand off to a smarter model
+**Save the job ID** — you'll need it for the poller script.
+
+#### 6b. Create poll.js (the lightweight poller)
+
+Create `<scriptsDir>/poll.js`:
+
+```javascript
+#!/usr/bin/env node
+// Nerve Cord lightweight poller — no AI cost when inbox is empty
+// Checks for pending messages; if found, triggers an OpenClaw cron job.
+// Run via launchd/systemd on an interval. Zero cost when idle.
+
+const http = require('http');
+const https = require('https');
+const { execSync } = require('child_process');
+
+const NERVE_SERVER = process.env.NERVE_SERVER || 'http://localhost:9999';
+const NERVE_TOKEN = process.env.NERVE_TOKEN;
+const NERVE_BOTNAME = process.env.NERVE_BOTNAME;
+const CRON_ID = process.env.OPENCLAW_CRON_ID;
+const NODE_BIN = process.env.NODE_PATH || '/opt/homebrew/opt/node@22/bin';
+
+if (!NERVE_TOKEN || !NERVE_BOTNAME || !CRON_ID) {
+  console.error('Required: NERVE_TOKEN, NERVE_BOTNAME, OPENCLAW_CRON_ID');
+  process.exit(1);
+}
+
+function get(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    mod.get(url, { headers }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve(data));
+    }).on('error', reject);
+  });
+}
+
+async function main() {
+  const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
+  const raw = await get(url, { Authorization: `Bearer ${NERVE_TOKEN}` });
+  let msgs;
+  try { msgs = JSON.parse(raw); } catch (e) {
+    console.error(`[${new Date().toISOString()}] Parse error: ${e.message}`);
+    process.exit(1);
+  }
+  msgs = msgs.filter(m => m.from !== NERVE_BOTNAME).slice(0, 3);
+  if (!msgs.length) process.exit(0); // Empty inbox — exit silently, zero cost
+
+  console.log(`[${new Date().toISOString()}] ${msgs.length} message(s) pending, triggering agent...`);
+  try {
+    const result = execSync(
+      `PATH=${NODE_BIN}:$PATH openclaw cron run ${CRON_ID} --timeout 60000`,
+      { encoding: 'utf8', timeout: 70000 }
+    );
+    console.log(`Agent triggered. ${result.trim()}`);
+  } catch (e) {
+    console.error(`Trigger failed: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+main().catch(e => { console.error(e.message); process.exit(1); });
+```
+
+#### 6c. Set up launchd (macOS) to run poll.js every 20s
+
+Create `~/Library/LaunchAgents/com.nervecord.poll.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nervecord.poll</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/node@22/bin/node</string>
+        <string><scriptsDir>/poll.js</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NERVE_TOKEN</key>
+        <string><token></string>
+        <key>NERVE_BOTNAME</key>
+        <string><myName></string>
+        <key>OPENCLAW_CRON_ID</key>
+        <string><cron-job-id></string>
+        <key>PATH</key>
+        <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>20</integer>
+    <key>StandardOutPath</key>
+    <string><scriptsDir>/logs/poll-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string><scriptsDir>/logs/poll-stderr.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Then load it:
+```bash
+mkdir -p <scriptsDir>/logs
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist
+```
+
+#### Why this is better
+
+| Approach | Idle cost/day | With mail |
+|----------|--------------|-----------|
+| **Old: AI cron every 20s** | ~$15/machine (GPT-5.2) or ~$3 (mini) | Same |
+| **New: poll.js + on-demand AI** | **$0** | Only pays per message handled |
+
+The poller is pure Node.js — no API calls, no tokens burned. AI only runs when there's actual mail.
 
 ## Sending a Message (from main session)
 

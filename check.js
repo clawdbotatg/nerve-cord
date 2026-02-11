@@ -20,7 +20,11 @@ mod.get(url, { headers: { Authorization: `Bearer ${TOKEN}` } }, res => {
   res.on('data', c => data += c);
   res.on('end', () => {
     try {
-      const msgs = JSON.parse(data);
+      let msgs = JSON.parse(data);
+      // Filter out messages from ourselves (prevents self-reply loops)
+      msgs = msgs.filter(m => m.from !== BOTNAME);
+      // Limit to 3 messages per poll to avoid timeouts
+      msgs = msgs.slice(0, 3);
       if (!msgs.length) process.exit(0); // no output = nothing to do
       console.log(JSON.stringify(msgs, null, 2));
     } catch (e) { console.error('Parse error:', e.message); process.exit(1); }

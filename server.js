@@ -9,6 +9,7 @@ const { nanoid } = require('nanoid');
 
 const PORT = parseInt(process.env.PORT || '9999', 10);
 const TOKEN = process.env.TOKEN || 'nerve-cord-default-token';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'messages.json');
 const BOTS_FILE = path.join(DATA_DIR, 'bots.json');
@@ -127,6 +128,17 @@ const server = http.createServer(async (req, res) => {
     const bot = bots.get(botMatch[1]);
     if (!bot) return json(res, 404, { error: 'bot not found' });
     return json(res, 200, bot);
+  }
+
+  // DELETE /bots/:name — unregister a bot (admin only)
+  if (req.method === 'DELETE' && botMatch) {
+    if (!ADMIN_TOKEN) return json(res, 403, { error: 'admin token not configured' });
+    const adminAuth = (req.headers['x-admin-token'] || '').trim();
+    if (adminAuth !== ADMIN_TOKEN) return json(res, 403, { error: 'admin access required' });
+    if (!bots.has(botMatch[1])) return json(res, 404, { error: 'bot not found' });
+    bots.delete(botMatch[1]);
+    save();
+    return json(res, 200, { deleted: botMatch[1] });
   }
 
   // --- Messages ---
