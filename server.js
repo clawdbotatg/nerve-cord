@@ -83,6 +83,19 @@ const server = http.createServer(async (req, res) => {
     } catch { return json(res, 500, { error: 'skill file not found' }); }
   }
 
+  // GET /scripts/:name — download helper scripts (crypto.js, check.js, reply.js)
+  const scriptMatch = p.match(/^\/scripts\/([a-zA-Z0-9_-]+\.js)$/);
+  if (req.method === 'GET' && scriptMatch) {
+    const allowed = ['crypto.js', 'check.js', 'reply.js'];
+    const name = scriptMatch[1];
+    if (!allowed.includes(name)) return json(res, 404, { error: 'not found' });
+    try {
+      const script = fs.readFileSync(path.join(__dirname, name), 'utf8');
+      res.writeHead(200, { 'Content-Type': 'application/javascript' });
+      return res.end(script);
+    } catch { return json(res, 500, { error: 'script not found' }); }
+  }
+
   if (!auth(req)) return json(res, 401, { error: 'unauthorized' });
 
   // --- Bot Registry ---
