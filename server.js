@@ -70,12 +70,152 @@ function auth(req) {
   return h === `Bearer ${TOKEN}`;
 }
 
+function formatUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60);
+  return [d && `${d}d`, h && `${h}h`, `${m}m`].filter(Boolean).join(' ');
+}
+
 // --- Routes ---
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
 
   // Public endpoints (no auth)
+  if (req.method === 'GET' && p === '/stats') {
+    expire();
+    const now = Date.now();
+    const allMsgs = [...messages.values()];
+    const botList = [...bots.values()];
+
+    const botStats = {};
+    for (const b of botList) {
+      const sent = allMsgs.filter(m => m.from === b.name);
+      const recv = allMsgs.filter(m => m.to === b.name);
+      const pending = recv.filter(m => m.status === 'pending');
+      const lastSent = sent.length ? sent.reduce((a, c) => new Date(c.created) > new Date(a.created) ? c : a) : null;
+      const lastRecv = recv.length ? recv.reduce((a, c) => new Date(c.created) > new Date(a.created) ? c : a) : null;
+      botStats[b.name] = {
+        registered: b.registered,
+        sent: sent.length,
+        received: recv.length,
+        pending: pending.length,
+        lastSentAt: lastSent?.created || null,
+        lastReceivedAt: lastRecv?.created || null,
+      };
+    }
+
+    const statusCounts = {};
+    for (const m of allMsgs) statusCounts[m.status] = (statusCounts[m.status] || 0) + 1;
+
+    const oneHourAgo = now - 3600_000;
+    const recentMsgs = allMsgs.filter(m => new Date(m.created).getTime() > oneHourAgo);
+
+    // JSON API
+    const wantsJson = (req.headers.accept || '').includes('application/json') ||
+                      url.searchParams.has('json');
+    if (wantsJson) {
+      return json(res, 200, {
+        uptime: Math.floor(process.uptime()),
+        uptimeHuman: formatUptime(process.uptime()),
+        totalMessages: allMsgs.length,
+        statusBreakdown: statusCounts,
+        messagesLastHour: recentMsgs.length,
+        bots: botStats,
+        botCount: botList.length,
+        serverTime: new Date().toISOString(),
+      });
+    }
+
+    // HTML dashboard
+    const ago = (iso) => {
+      if (!iso) return '<span style="color:#666">never</span>';
+      const s = Math.floor((now - new Date(iso).getTime()) / 1000);
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s/60)}m ago`;
+      if (s < 86400) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m ago`;
+      return `${Math.floor(s/86400)}d ago`;
+    };
+
+    const botRows = Object.entries(botStats).map(([name, b]) => {
+      const pendingBadge = b.pending > 0
+        ? `<span style="background:#e74c3c;color:#fff;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:bold">${b.pending}</span>`
+        : `<span style="color:#666">0</span>`;
+      return `<tr>
+        <td style="font-weight:bold">🤖 ${name}</td>
+        <td>${b.sent}</td>
+        <td>${b.received}</td>
+        <td>${pendingBadge}</td>
+        <td>${ago(b.lastSentAt)}</td>
+        <td>${ago(b.lastReceivedAt)}</td>
+      </tr>`;
+    }).join('');
+
+    const statusBars = Object.entries(statusCounts).map(([s, c]) => {
+      const colors = { pending: '#e67e22', seen: '#3498db', replied: '#2ecc71' };
+      const color = colors[s] || '#95a5a6';
+      return `<div style="display:inline-block;margin-right:16px">
+        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${color};margin-right:4px;vertical-align:middle"></span>
+        <strong>${c}</strong> ${s}
+      </div>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🦀 Nerve Cord</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+  .container { max-width: 800px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; text-align: center; }
+  .card .num { font-size: 28px; font-weight: bold; color: #58a6ff; }
+  .card .label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  .section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .section h2 { font-size: 16px; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; color: #8b949e; font-weight: normal; padding: 6px 8px; border-bottom: 1px solid #30363d; }
+  td { padding: 8px; border-bottom: 1px solid #21262d; }
+  .refresh { color: #8b949e; font-size: 12px; text-align: center; margin-top: 16px; }
+  .refresh a { color: #58a6ff; text-decoration: none; }
+</style>
+</head><body>
+<div class="container">
+  <h1>🦀 Nerve Cord</h1>
+  <div class="subtitle">Inter-bot message broker &middot; Up ${formatUptime(process.uptime())}</div>
+
+  <div class="cards">
+    <div class="card"><div class="num">${allMsgs.length}</div><div class="label">Total Messages</div></div>
+    <div class="card"><div class="num">${recentMsgs.length}</div><div class="label">Last Hour</div></div>
+    <div class="card"><div class="num">${statusCounts.pending || 0}</div><div class="label">Pending</div></div>
+    <div class="card"><div class="num">${botList.length}</div><div class="label">Bots</div></div>
+  </div>
+
+  <div class="section">
+    <h2>Message Status</h2>
+    <div style="padding:4px 0">${statusBars}</div>
+  </div>
+
+  <div class="section">
+    <h2>Bots</h2>
+    <table>
+      <tr><th>Name</th><th>Sent</th><th>Recv</th><th>Pending</th><th>Last Sent</th><th>Last Recv</th></tr>
+      ${botRows}
+    </table>
+  </div>
+
+  <div class="refresh">Auto-refreshes every 30s &middot; <a href="/stats?json">JSON API</a></div>
+</div>
+<script>setTimeout(()=>location.reload(), 30000)</script>
+</body></html>`;
+
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    return res.end(html);
+  }
+
   if (req.method === 'GET' && p === '/skill') {
     try {
       const skill = fs.readFileSync(path.join(__dirname, 'SKILL.md'), 'utf8');

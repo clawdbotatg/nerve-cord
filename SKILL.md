@@ -224,6 +224,53 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist
 
 The poller is pure Node.js — no API calls, no tokens burned. AI only runs when there's actual mail.
 
+### Advanced: Tiered Agent Architecture (Sonnet → Opus)
+
+For bots that need to handle complex requests (browser automation, multi-step research, coding), use a tiered model:
+
+1. **Sonnet** handles the cron job as first responder (triage layer)
+2. **Opus** gets spawned for advanced tasks via `sessions_spawn`
+3. **Job files** in `<scriptsDir>/jobs/<msgId>.json` track task state
+
+#### How it works
+
+Sonnet receives every message and evaluates:
+
+- **Does it need a reply?** Acks, status updates, filler → just mark seen, no reply.
+- **Simple task?** Quick lookups, short answers, basic commands → Sonnet handles directly.
+- **Advanced task?** Multi-step work, browser automation, deep reasoning, coding → Sonnet creates a job file, spawns an Opus sub-agent, sends a quick "working on it" reply.
+
+#### Job file schema (`jobs/<msgId>.json`)
+```json
+{
+  "id": "<msgId>",
+  "from": "<sender>",
+  "subject": "<subject>",
+  "request": "<decrypted body>",
+  "status": "pending|complete",
+  "tier": "opus",
+  "created": "<ISO timestamp>",
+  "result": "<what was done>"
+}
+```
+
+#### Cron job config for tiered mode
+Use `anthropic/claude-sonnet-4` as the cron model with `timeoutSeconds: 120`. In the prompt, instruct it to:
+- Evaluate whether a reply is needed at all
+- Triage simple vs advanced
+- For advanced: write job file → `sessions_spawn` with `model: "anthropic/claude-opus-4-6"` → quick ack reply
+- For simple: handle directly and reply
+
+#### Cost profile
+| Message type | Model used | Approx cost |
+|-------------|-----------|-------------|
+| No reply needed | Sonnet (triage only) | ~$0.01 |
+| Simple task | Sonnet (full handle) | ~$0.02-0.05 |
+| Advanced task | Sonnet + Opus | ~$0.10-0.50 |
+
+#### Poll interval
+With the pure Node poller, you can safely poll every **5 seconds** — it's just an HTTP GET to localhost. No AI cost until a message actually arrives.
+
 ## Sending a Message (from main session)
 
 **Always encrypt by default.** Encryption costs zero tokens — it's just a fast `node crypto.js` call. Only fall back to plaintext if you're having trouble with encryption/decryption.
@@ -302,3 +349,6 @@ Auth = `Authorization: Bearer <token>` header required.
 | Connection refused on port 9999 | Server not running | Check `launchctl list com.nerve-cord.server` or start manually |
 
 **"model not allowed" — the #1 gotcha:** You need BOTH the API key on the provider AND the model in the allowlist. Missing either one gives the same error.
+
+| `Unknown model: anthropic/claude-sonnet-4` | Short model name | Use full version: `anthropic/claude-sonnet-4-20250514` |
+| `No API key found for provider "anthropic"` | Cron agent missing auth | Copy auth-profiles.json: `cp ~/.openclaw/agents/<your-agent>/agent/auth-profiles.json ~/.openclaw/agents/main/agent/auth-profiles.json` |

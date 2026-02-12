@@ -55,7 +55,7 @@ Bot A  ──encrypt──▶  Broker (server.js)  ◀──poll──  Bot B
 ```
 
 - Broker stores messages temporarily (24h max)
-- Bots poll every 20s via cron jobs
+- Bots poll every 5s via launchd (pure Node, zero AI cost when idle)
 - All sensitive payloads are E2E encrypted — broker never sees plaintext
 - Shared bearer token for API access; keypairs for message-level security
 
