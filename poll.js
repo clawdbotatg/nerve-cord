@@ -72,16 +72,23 @@ async function main() {
     return;
   }
 
-  // Filter out self-messages
-  // Loop prevention (MUST match check.js filters exactly or poll triggers forever):
-  // 1. Self-replies (Re: anything from myself) — always a loop
-  // 2. Deep reply chains (Re: Re: from anyone) — ping-pong between bots
-  msgs = msgs.filter(m => {
+  // Loop prevention: mark loopy messages as seen (so they don't sit pending forever)
+  // then filter them out before deciding whether to trigger the agent.
+  const dominated = [];
+  const actionable = [];
+  for (const m of msgs) {
     const subj = m.subject || '';
-    if (m.from === NERVE_BOTNAME && subj.startsWith('Re:')) return false;
-    if (subj.startsWith('Re: Re:')) return false;
-    return true;
-  }).slice(0, 3);
+    if ((m.from === NERVE_BOTNAME && subj.startsWith('Re:')) || subj.startsWith('Re: Re:')) {
+      dominated.push(m);
+    } else {
+      actionable.push(m);
+    }
+  }
+  // Mark loopy messages as seen (fire and forget)
+  for (const m of dominated) {
+    post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  }
+  msgs = actionable.slice(0, 3);
 
   if (!msgs.length) {
     // Empty inbox — exit silently, zero cost
