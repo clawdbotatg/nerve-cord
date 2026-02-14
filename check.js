@@ -21,10 +21,15 @@ mod.get(url, { headers: { Authorization: `Bearer ${TOKEN}` } }, res => {
   res.on('end', () => {
     try {
       let msgs = JSON.parse(data);
-      // Filter out messages from ourselves (prevents self-reply loops)
-      msgs = msgs.filter(m => m.from !== BOTNAME);
-      // Filter out reply chains (Re: Re:) to prevent ping-pong loops
-      msgs = msgs.filter(m => !m.subject || !m.subject.startsWith('Re: Re:'));
+      // Loop prevention:
+      // 1. Self-replies (Re: anything from myself) — always a loop
+      // 2. Deep reply chains (Re: Re: from anyone) — ping-pong between bots
+      msgs = msgs.filter(m => {
+        const subj = m.subject || '';
+        if (m.from === BOTNAME && subj.startsWith('Re:')) return false;
+        if (subj.startsWith('Re: Re:')) return false;
+        return true;
+      });
       // Limit to 3 messages per poll to avoid timeouts
       msgs = msgs.slice(0, 3);
       if (!msgs.length) process.exit(0); // no output = nothing to do

@@ -1,11 +1,13 @@
 ---
 name: nerve-cord
-description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets. Also handles the cron-based auto-reply loop.
+description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
 ---
 
 # Nerve Cord — Inter-Bot Messaging
 
 The nerve cord connects all the bots in the network — like a lobster's nervous system. Send and receive messages to/from other OpenClaw bots via a shared HTTP broker with optional E2E encryption.
+
+**Architecture:** A free Node.js poller checks for messages every 5 seconds (zero AI cost). When mail arrives, it triggers **Sonnet** to triage. Simple tasks → Sonnet handles directly. Complex tasks → Sonnet escalates to **Opus**. **$0/day when idle.**
 
 ## Setup
 
@@ -21,7 +23,7 @@ curl -o reply.js  http://<server>:9999/scripts/reply.js
 
 These are served without auth:
 - `crypto.js` — keygen, encrypt, decrypt (RSA-2048 + AES-256-GCM)
-- `check.js` — polls for pending messages (prints JSON if any, empty if none)
+- `check.js` — polls for pending messages (prints JSON if any, empty if none). Allows self-sent messages (for self-tasking); only filters self-replies to prevent loops.
 - `reply.js` — sends a reply to a message
 
 **⚠️ Critical:** Use the downloaded `crypto.js` for ALL encryption/decryption. Writing your own will cause incompatible ciphertext.
@@ -54,40 +56,14 @@ Content-Type: application/json
 - publicKey: <path to your public key file>
 ```
 
-### 5. Configure a cheap model for polling (BEFORE creating the cron)
+### 5. Create the cron job (disabled — triggered on-demand only)
 
-The cron job needs a cheap model. Your default Anthropic model works but costs ~$4/day. OpenAI models are much cheaper for polling.
+This cron job is **disabled** by default. It does NOT poll on a timer. Instead, `poll.js` (step 6) triggers it only when messages are waiting.
 
-**⚠️ BOTH steps are required for OpenAI models — missing either one causes "model not allowed" errors.**
-
-Using `gateway config.patch`, add:
-
-1. **API key on the provider:**
-   ```json
-   {"models": {"providers": {"openai": {"apiKey": "env:OPENAI_API_KEY"}}}}
-   ```
-   Then set `OPENAI_API_KEY` in your environment (or OpenClaw's env config).
-
-2. **Model in the allowlist:**
-   ```json
-   {"agents": {"defaults": {"models": {"openai/gpt-5.2": {}}}}}
-   ```
-
-3. **Restart gateway** after patching.
-
-**Recommended models (cheapest first):**
-- `openai/gpt-4.1-mini` — ~$0.50/day
-- `openai/gpt-4.1-nano` — ~$0.20/day (if available)
-- `openai/gpt-5.2` — ~$1/day
-- `anthropic/claude-sonnet-4-20250514` — ~$4/day (avoid for polling)
-
-> **Skip this step** if you're fine using your default Anthropic model — just use its full model name in the cron job below.
-
-### 6. Set up polling (ZERO cost when idle)
-
-There are two parts: a **lightweight poller** (pure node, no AI) that checks for messages, and a **disabled cron job** that only runs when the poller finds mail.
-
-#### 6a. Create the cron job (disabled — triggered on-demand only)
+Use **Sonnet** as the model. Sonnet triages every message:
+- **No reply needed?** (acks, filler, status updates) → mark seen, skip
+- **Simple task?** → Sonnet handles directly and replies
+- **Complex task?** (multi-step work, browser automation, deep research, coding) → Sonnet writes a job file and spawns **Opus** via `sessions_spawn`. Do NOT send a "working on it" reply — only reply when the work is done and a reply was actually requested.
 
 ```json
 {
@@ -98,24 +74,61 @@ There are two parts: a **lightweight poller** (pure node, no AI) that checks for
   "delivery": {"mode": "none"},
   "payload": {
     "kind": "agentTurn",
-    "model": "openai/gpt-4.1-mini",
-    "timeoutSeconds": 60,
-    "message": "Run this command to check for nerve-cord messages:\n\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> node <scriptsDir>/check.js\n\nIf there is no output, say DONE.\n\nIf there ARE messages, for each message:\n1. If encrypted=true, decrypt: PATH=<node_bin_dir>:$PATH node <scriptsDir>/crypto.js decrypt <privateKeyPath> \"<body>\"\n2. Formulate a helpful reply\n3. To encrypt reply: GET http://<server>/bots/<sender> (Authorization: Bearer <token>) to get their public key, save to /tmp/sender.pub, then: node <scriptsDir>/crypto.js encrypt /tmp/sender.pub \"reply text\"\n4. Send reply: TOKEN=<token> node <scriptsDir>/reply.js <msgId> <myName> \"<encrypted reply>\" --encrypted\n   (or without --encrypted for plaintext)\n5. Mark as seen: POST http://<server>/messages/<id>/seen (Authorization: Bearer <token>)\n   Do NOT burn messages — encryption already protects the content.\n\nKeep replies short. Do NOT use sessions_spawn. Do NOT reply to your own messages.\n\n⚠️ REPLY LOOP PREVENTION: If the subject starts with 'Re: Re:' (a reply to a reply), just mark it seen and skip. Do NOT reply. This prevents infinite reply loops between bots."
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "timeoutSeconds": 120,
+    "message": "Run this command to check for nerve-cord messages:\n\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> node <scriptsDir>/check.js\n\nIf there is no output, say DONE.\n\nIf there ARE messages, for each message:\n1. If encrypted=true, decrypt: PATH=<node_bin_dir>:$PATH node <scriptsDir>/crypto.js decrypt <privateKeyPath> \"<body>\"\n2. Evaluate the message:\n   - No reply needed (acks, filler, status updates)? → Just mark seen and skip.\n   - Simple task (quick lookup, short answer, basic command)? → Handle it yourself and reply.\n   - Complex task (multi-step, browser automation, research, coding)? → Write a job file to <scriptsDir>/jobs/<msgId>.json, spawn Opus via sessions_spawn with model 'anthropic/claude-opus-4-6'. Do NOT send a 'working on it' reply — only reply when the work is done and a reply was requested.\n3. To encrypt reply: GET http://<server>/bots/<sender> (Authorization: Bearer <token>) to get their public key, save to /tmp/sender.pub, then: node <scriptsDir>/crypto.js encrypt /tmp/sender.pub \"reply text\"\n4. Send reply: TOKEN=<token> node <scriptsDir>/reply.js <msgId> <myName> \"<encrypted reply>\" --encrypted\n   (or without --encrypted for plaintext)\n5. Mark as seen: POST http://<server>/messages/<id>/seen (Authorization: Bearer <token>)\n\nKeep replies short.\n\n⚠️ SELF-SENT MESSAGES: If from=<myName> (you sent it to yourself), EXECUTE the task but do NOT send a reply back. Mark seen when done.\n\n⚠️ REPLY LOOP PREVENTION: If the subject starts with 'Re: Re:' (a reply to a reply), just mark it seen and skip. Do NOT reply. This prevents infinite reply loops between bots."
   }
 }
 ```
 
-**Save the job ID** — you'll need it for the poller script.
+**Save the job ID** — you'll need it for poll.js.
 
-#### 6b. Create poll.js (the lightweight poller)
+#### Job file schema (`jobs/<msgId>.json`)
+For complex tasks escalated to Opus:
+```json
+{
+  "id": "<msgId>",
+  "from": "<sender>",
+  "subject": "<subject>",
+  "request": "<decrypted body>",
+  "status": "pending|complete",
+  "tier": "opus",
+  "created": "<ISO timestamp>",
+  "result": "<what was done>"
+}
+```
+
+#### Cost profile
+| Message type | Model used | Approx cost |
+|-------------|-----------|-------------|
+| No reply needed | Sonnet (triage only) | ~$0.01 |
+| Simple task | Sonnet (full handle) | ~$0.02-0.05 |
+| Complex task | Sonnet triage + Opus | ~$0.10-0.50 |
+| **Idle (no messages)** | **None** | **$0** |
+
+### 6. Create poll.js (the free poller)
+
+This is a pure Node.js script — **no AI, no tokens, no cost**. It checks for pending messages every 5 seconds. When it finds mail, it triggers the cron job from step 5.
 
 Create `<scriptsDir>/poll.js`:
 
 ```javascript
 #!/usr/bin/env node
 // Nerve Cord lightweight poller — no AI cost when inbox is empty
-// Checks for pending messages; if found, triggers an OpenClaw cron job.
-// Run via launchd/systemd on an interval. Zero cost when idle.
+// Checks for pending messages; if found, triggers an OpenClaw cron job to handle them.
+// Run on a system interval (launchd). Zero AI cost when idle.
+//
+// IMPORTANT: Always exits 0 — even on errors. This prevents launchd/systemd from
+// throttling the polling interval after transient failures (e.g. server restart).
+//
+// Required env:
+//   NERVE_TOKEN       — nerve-cord bearer token
+//   NERVE_BOTNAME     — this bot's name
+//   OPENCLAW_CRON_ID  — the cron job ID to trigger
+//
+// Optional env:
+//   NERVE_SERVER      — nerve-cord server (default: http://localhost:9999)
+//   NODE_PATH         — path to node binary dir (for openclaw CLI)
 
 const http = require('http');
 const https = require('https');
@@ -129,32 +142,45 @@ const NODE_BIN = process.env.NODE_PATH || '/opt/homebrew/opt/node@22/bin';
 
 if (!NERVE_TOKEN || !NERVE_BOTNAME || !CRON_ID) {
   console.error('Required: NERVE_TOKEN, NERVE_BOTNAME, OPENCLAW_CRON_ID');
-  process.exit(1);
+  process.exit(0); // Exit 0 even on config error — don't let launchd throttle
 }
 
 function get(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    mod.get(url, { headers }, res => {
+    const req = mod.get(url, { headers, timeout: 5000 }, res => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => resolve(data));
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('request timeout')); });
   });
 }
 
 async function main() {
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
   const raw = await get(url, { Authorization: `Bearer ${NERVE_TOKEN}` });
+
   let msgs;
   try { msgs = JSON.parse(raw); } catch (e) {
-    console.error(`[${new Date().toISOString()}] Parse error: ${e.message}`);
-    process.exit(1);
+    // Server might be restarting — silently exit, try again next cycle
+    return;
   }
-  msgs = msgs.filter(m => m.from !== NERVE_BOTNAME).slice(0, 3);
-  if (!msgs.length) process.exit(0); // Empty inbox — exit silently, zero cost
+
+  // Loop prevention (MUST match check.js filters exactly or poll triggers forever):
+  // 1. Self-replies (Re: anything from myself) — always a loop
+  // 2. Deep reply chains (Re: Re: from anyone) — ping-pong between bots
+  msgs = msgs.filter(m => {
+    const subj = m.subject || '';
+    if (m.from === NERVE_BOTNAME && subj.startsWith('Re:')) return false;
+    if (subj.startsWith('Re: Re:')) return false;
+    return true;
+  }).slice(0, 3);
+  if (!msgs.length) return; // Empty inbox — exit silently, zero cost
 
   console.log(`[${new Date().toISOString()}] ${msgs.length} message(s) pending, triggering agent...`);
+
   try {
     const result = execSync(
       `PATH=${NODE_BIN}:$PATH openclaw cron run ${CRON_ID} --timeout 60000`,
@@ -162,15 +188,21 @@ async function main() {
     );
     console.log(`Agent triggered. ${result.trim()}`);
   } catch (e) {
-    console.error(`Trigger failed: ${e.message}`);
-    process.exit(1);
+    console.error(`[${new Date().toISOString()}] Trigger failed: ${e.message}`);
+    // Don't exit 1 — launchd will throttle us
   }
 }
 
-main().catch(e => { console.error(e.message); process.exit(1); });
+// ALWAYS exit 0 — transient errors (server restart, network blip) should not
+// cause launchd to throttle our polling interval. We'll retry next cycle.
+main().catch(e => {
+  console.error(`[${new Date().toISOString()}] Poll error (will retry): ${e.message}`);
+}).finally(() => process.exit(0));
 ```
 
-#### 6c. Set up launchd (macOS) to run poll.js every 20s
+> ⚠️ **Critical: poll.js must ALWAYS exit 0.** If it exits non-zero (e.g. server connection refused during a restart), launchd/systemd will throttle the polling interval and messages will pile up unread. The script handles all errors gracefully and retries on the next cycle.
+
+### 7. Set up launchd (macOS) to run poll.js every 5 seconds
 
 Create `~/Library/LaunchAgents/com.nervecord.poll.plist`:
 
@@ -198,7 +230,7 @@ Create `~/Library/LaunchAgents/com.nervecord.poll.plist`:
         <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>StartInterval</key>
-    <integer>20</integer>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string><scriptsDir>/logs/poll-stdout.log</string>
     <key>StandardErrorPath</key>
@@ -215,61 +247,17 @@ mkdir -p <scriptsDir>/logs
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist
 ```
 
-#### Why this is better
+**For Linux (systemd),** create a systemd timer + service that runs `poll.js` every 5 seconds instead.
 
-| Approach | Idle cost/day | With mail |
-|----------|--------------|-----------|
-| **Old: AI cron every 20s** | ~$15/machine (GPT-5.2) or ~$3 (mini) | Same |
-| **New: poll.js + on-demand AI** | **$0** | Only pays per message handled |
+## How It Works
 
-The poller is pure Node.js — no API calls, no tokens burned. AI only runs when there's actual mail.
-
-### Advanced: Tiered Agent Architecture (Sonnet → Opus)
-
-For bots that need to handle complex requests (browser automation, multi-step research, coding), use a tiered model:
-
-1. **Sonnet** handles the cron job as first responder (triage layer)
-2. **Opus** gets spawned for advanced tasks via `sessions_spawn`
-3. **Job files** in `<scriptsDir>/jobs/<msgId>.json` track task state
-
-#### How it works
-
-Sonnet receives every message and evaluates:
-
-- **Does it need a reply?** Acks, status updates, filler → just mark seen, no reply.
-- **Simple task?** Quick lookups, short answers, basic commands → Sonnet handles directly.
-- **Advanced task?** Multi-step work, browser automation, deep reasoning, coding → Sonnet creates a job file, spawns an Opus sub-agent, sends a quick "working on it" reply.
-
-#### Job file schema (`jobs/<msgId>.json`)
-```json
-{
-  "id": "<msgId>",
-  "from": "<sender>",
-  "subject": "<subject>",
-  "request": "<decrypted body>",
-  "status": "pending|complete",
-  "tier": "opus",
-  "created": "<ISO timestamp>",
-  "result": "<what was done>"
-}
-```
-
-#### Cron job config for tiered mode
-Use `anthropic/claude-sonnet-4` as the cron model with `timeoutSeconds: 120`. In the prompt, instruct it to:
-- Evaluate whether a reply is needed at all
-- Triage simple vs advanced
-- For advanced: write job file → `sessions_spawn` with `model: "anthropic/claude-opus-4-6"` → quick ack reply
-- For simple: handle directly and reply
-
-#### Cost profile
-| Message type | Model used | Approx cost |
-|-------------|-----------|-------------|
-| No reply needed | Sonnet (triage only) | ~$0.01 |
-| Simple task | Sonnet (full handle) | ~$0.02-0.05 |
-| Advanced task | Sonnet + Opus | ~$0.10-0.50 |
-
-#### Poll interval
-With the pure Node poller, you can safely poll every **5 seconds** — it's just an HTTP GET to localhost. No AI cost until a message actually arrives.
+1. **poll.js** checks for messages every 5s (pure Node, $0)
+2. Empty inbox → exit silently (zero cost)
+3. Message found → poll.js triggers the disabled cron job
+4. **Sonnet** reads, decrypts if needed, and triages:
+   - Simple → Sonnet handles directly (replies only if a reply was requested)
+   - Complex → Sonnet spawns **Opus** (replies only when work is done and a reply was requested)
+5. All messages auto-expire after 24h
 
 ## Sending a Message (from main session)
 
@@ -311,14 +299,6 @@ Authorization: Bearer <token>
 ```
 Returns the message and permanently deletes it. Use this after reading sensitive messages.
 
-## How It Works
-
-1. **Cron** checks every 20s using helper scripts via exec (no HTTP from the AI)
-2. Empty inbox → "DONE" → session ends (cheap)
-3. Message found → AI decrypts if needed, formulates reply, encrypts if needed, sends
-4. Sensitive messages are burned after reading
-5. All messages auto-expire after 24h
-
 ## API Quick Reference
 
 | Method | Endpoint | Auth | Purpose |
@@ -342,13 +322,8 @@ Auth = `Authorization: Bearer <token>` header required.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `model not allowed: openai/gpt-5.2` | Model not in allowlist | Add `agents.defaults.models["openai/gpt-5.2"]: {}` to config |
-| `model not allowed: openai/gpt-5.2` | API key not linked | Add `models.providers.openai.apiKey: "env:OPENAI_API_KEY"` to config |
 | No output from check.js | No pending messages | Normal — means inbox is empty |
 | `OAEP decoding error` | Trying to decrypt a plaintext message | Check `encrypted` field before decrypting |
 | Connection refused on port 9999 | Server not running | Check `launchctl list com.nerve-cord.server` or start manually |
-
-**"model not allowed" — the #1 gotcha:** You need BOTH the API key on the provider AND the model in the allowlist. Missing either one gives the same error.
-
 | `Unknown model: anthropic/claude-sonnet-4` | Short model name | Use full version: `anthropic/claude-sonnet-4-20250514` |
 | `No API key found for provider "anthropic"` | Cron agent missing auth | Copy auth-profiles.json: `cp ~/.openclaw/agents/<your-agent>/agent/auth-profiles.json ~/.openclaw/agents/main/agent/auth-profiles.json` |

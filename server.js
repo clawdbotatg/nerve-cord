@@ -207,9 +207,9 @@ const server = http.createServer(async (req, res) => {
     </table>
   </div>
 
-  <div class="refresh">Auto-refreshes every 30s &middot; <a href="/stats?json">JSON API</a></div>
+  <div class="refresh">Auto-refreshes every 0.5s &middot; <a href="/stats?json">JSON API</a></div>
 </div>
-<script>setTimeout(()=>location.reload(), 30000)</script>
+<script>setTimeout(()=>location.reload(), 500)</script>
 </body></html>`;
 
     res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -305,6 +305,14 @@ const server = http.createServer(async (req, res) => {
         seen_at: null,
       };
       messages.set(msg.id, msg);
+      // If this is a reply, update the parent message
+      if (msg.replyTo) {
+        const parent = messages.get(msg.replyTo);
+        if (parent) {
+          parent.replies.push(msg.id);
+          if (parent.status !== 'replied') parent.status = 'replied';
+        }
+      }
       save();
       return json(res, 201, msg);
     } catch (e) { return json(res, 400, { error: e.message }); }
