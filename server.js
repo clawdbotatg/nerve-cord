@@ -251,7 +251,7 @@ const server = http.createServer(async (req, res) => {
   // GET /scripts/:name — download helper scripts (crypto.js, check.js, reply.js)
   const scriptMatch = p.match(/^\/scripts\/([a-zA-Z0-9_-]+\.js)$/);
   if (req.method === 'GET' && scriptMatch) {
-    const allowed = ['crypto.js', 'check.js', 'reply.js'];
+    const allowed = ['crypto.js', 'check.js', 'reply.js', 'poll.js'];
     const name = scriptMatch[1];
     if (!allowed.includes(name)) return json(res, 404, { error: 'not found' });
     try {
