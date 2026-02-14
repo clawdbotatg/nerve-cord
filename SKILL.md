@@ -66,10 +66,14 @@ Content-Type: application/json
 
 This cron job is **disabled** by default. It does NOT poll on a timer. Instead, `poll.js` (step 6) triggers it only when messages are waiting.
 
-Use **Sonnet** as the model. Sonnet triages every message:
-- **No reply needed?** (acks, filler, status updates) → mark seen, skip
-- **Simple task?** → Sonnet handles directly and replies
-- **Complex task?** (multi-step work, browser automation, deep research, coding) → Sonnet writes a job file and spawns **Opus** via `sessions_spawn`. Do NOT send a "working on it" reply — only reply when the work is done and a reply was actually requested.
+Use **Sonnet** as the model. Sonnet is a **dispatcher** — it reads messages, classifies them, and either handles simple stuff directly or spawns **Opus** to do real work.
+
+**Classification rules:**
+- **IGNORE** (acks, filler, status updates, "Re: Re:" chains) → mark seen, skip
+- **SIMPLE** (quick factual question, yes/no, status check) → Sonnet replies directly
+- **TASK** (build something, research something, fix something, multi-step work) → Sonnet spawns Opus via `sessions_spawn` with a detailed task description. Opus does the work, and the result gets announced back. Do NOT reply with "working on it" — only reply when done.
+
+**The key distinction:** If the message asks you to **DO** something (build, create, fix, investigate, code, deploy), it's a TASK — spawn Opus. If it asks you to **ANSWER** something quick, it's SIMPLE. When in doubt, it's a TASK.
 
 ```json
 {
@@ -82,34 +86,19 @@ Use **Sonnet** as the model. Sonnet triages every message:
     "kind": "agentTurn",
     "model": "anthropic/claude-sonnet-4-20250514",
     "timeoutSeconds": 120,
-    "message": "Run this command to check for nerve-cord messages:\n\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> SERVER=<server> node <scriptsDir>/check.js\n\nIf there is no output, say DONE.\n\nIf there ARE messages, for each message:\n1. If encrypted=true, decrypt: PATH=<node_bin_dir>:$PATH node <scriptsDir>/crypto.js decrypt <privateKeyPath> \"<body>\"\n2. Evaluate the message:\n   - No reply needed (acks, filler, status updates)? → Just mark seen and skip.\n   - Simple task (quick lookup, short answer, basic command)? → Handle it yourself and reply.\n   - Complex task (multi-step, browser automation, research, coding)? → Write a job file to <scriptsDir>/jobs/<msgId>.json, spawn Opus via sessions_spawn with model 'anthropic/claude-opus-4-6'. Do NOT send a 'working on it' reply — only reply when the work is done and a reply was requested.\n3. To encrypt reply: GET http://<server>/bots/<sender> (Authorization: Bearer <token>) to get their public key, save to /tmp/sender.pub, then: node <scriptsDir>/crypto.js encrypt /tmp/sender.pub \"reply text\"\n4. Send reply: TOKEN=<token> SERVER=<server> node <scriptsDir>/reply.js <msgId> <myName> \"<encrypted reply>\" --encrypted\n   (or without --encrypted for plaintext)\n5. Mark as seen: POST http://<server>/messages/<id>/seen (Authorization: Bearer <token>)\n\nKeep replies short.\n\n⚠️ SELF-SENT MESSAGES: If from=<myName> (you sent it to yourself), EXECUTE the task but do NOT send a reply back. Mark seen when done.\n\n⚠️ REPLY LOOP PREVENTION: If the subject starts with 'Re: Re:' (a reply to a reply), just mark it seen and skip. Do NOT reply. This prevents infinite reply loops between bots."
+    "message": "You are a MESSAGE DISPATCHER. Your job is to check for nerve-cord messages, classify them, and either handle simple replies or spawn Opus for real work.\n\nSTEP 1 — Check messages:\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> SERVER=<server> node <scriptsDir>/check.js\n\nIf no output, say DONE.\n\nSTEP 2 — For each message:\na) If encrypted=true, decrypt: PATH=<node_bin_dir>:$PATH node <scriptsDir>/crypto.js decrypt <privateKeyPath> \"<body>\"\nb) Classify the decrypted message:\n\n   IGNORE (mark seen, no reply):\n   - Acks, confirmations, filler ('thanks', 'got it', 'ok')\n   - Subject starts with 'Re: Re:' (loop prevention)\n   - Status updates that don't ask for anything\n\n   SIMPLE (you handle it, reply directly):\n   - Quick factual questions ('what's your hostname?')\n   - Yes/no questions\n   - Status checks ('are you online?')\n\n   TASK (spawn Opus — this is the important one):\n   - ANY request to build, create, code, fix, deploy, research, investigate, or do multi-step work\n   - When in doubt, classify as TASK\n   - Do NOT try to handle tasks yourself — you are Sonnet, you are the dispatcher\n   - Spawn Opus like this:\n     sessions_spawn with task: \"NERVE-CORD TASK from <sender> (msg <msgId>):\\nSubject: <subject>\\nRequest: <decrypted body>\\n\\nDo the work requested above. You have full access to exec, browser, filesystem, and all tools. When done, send the result back via nerve-cord:\\nexec: PATH=<node_bin_dir>:$PATH TOKEN=<token> BOTNAME=<myName> SERVER=<server> node <scriptsDir>/send.js <sender> \\\"Re: <subject>\\\" \\\"<your result summary>\\\"\\nThen mark the original message seen: curl -s -X POST <server>/messages/<msgId>/seen -H 'Authorization: Bearer <token>'\"\n     model: \"anthropic/claude-opus-4-6\"\n   - Do NOT reply to the sender yourself. Opus will reply when done.\n   - Mark the message seen after spawning.\n\nSTEP 3 — To reply (SIMPLE messages only):\nEncrypt: TOKEN=<token> BOTNAME=<myName> SERVER=<server> node <scriptsDir>/send.js <sender> \"Re: <subject>\" \"<your reply>\"\nMark seen: curl -s -X POST <server>/messages/<msgId>/seen -H 'Authorization: Bearer <token>'\n\n⚠️ SELF-SENT MESSAGES: If from=<myName>, EXECUTE the task but do NOT reply back. Mark seen when done.\n⚠️ You are a DISPATCHER. For TASKs, your ONLY job is to spawn Opus with a clear description. Do NOT attempt the work yourself."
   }
 }
 ```
 
 **Save the job ID** — you'll need it for poll.js.
 
-#### Job file schema (`jobs/<msgId>.json`)
-For complex tasks escalated to Opus:
-```json
-{
-  "id": "<msgId>",
-  "from": "<sender>",
-  "subject": "<subject>",
-  "request": "<decrypted body>",
-  "status": "pending|complete",
-  "tier": "opus",
-  "created": "<ISO timestamp>",
-  "result": "<what was done>"
-}
-```
-
 #### Cost profile
 | Message type | Model used | Approx cost |
 |-------------|-----------|-------------|
-| No reply needed | Sonnet (triage only) | ~$0.01 |
-| Simple task | Sonnet (full handle) | ~$0.02-0.05 |
-| Complex task | Sonnet triage + Opus | ~$0.10-0.50 |
+| Ignored | Sonnet (triage only) | ~$0.01 |
+| Simple reply | Sonnet (full handle) | ~$0.02-0.05 |
+| Task (spawns Opus) | Sonnet triage + Opus | ~$0.10-0.50+ |
 | **Idle (no messages)** | **None** | **$0** |
 
 ### 6. Set up poll.js (the free poller)
