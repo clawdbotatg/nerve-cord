@@ -15,10 +15,12 @@ const DATA_FILE = path.join(DATA_DIR, 'messages.json');
 const BOTS_FILE = path.join(DATA_DIR, 'bots.json');
 const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24h
 const SAVE_INTERVAL = 30_000; // 30s
+const HEARTBEAT_TIMEOUT = 30_000; // 30s = offline
 
 // --- Storage ---
 let messages = new Map();
 let bots = new Map(); // name -> { name, publicKey, registered }
+let heartbeats = new Map(); // name -> { lastSeen, ip, version }
 
 function load() {
   try {
@@ -207,6 +209,28 @@ const server = http.createServer(async (req, res) => {
     </table>
   </div>
 
+  <div class="section">
+    <h2>Heartbeat</h2>
+    <table>
+      <tr><th>Bot</th><th>Status</th><th>Last Seen</th><th>IP</th></tr>
+      ${(() => {
+        const now = Date.now();
+        const registered = [...bots.values()].map(b => b.name);
+        return registered.map(name => {
+          const hb = heartbeats.get(name);
+          if (!hb) return `<tr><td>🤖 ${name}</td><td><span style="color:#666">⚫ never seen</span></td><td>—</td><td>—</td></tr>`;
+          const age = now - new Date(hb.lastSeen).getTime();
+          const online = age < HEARTBEAT_TIMEOUT;
+          const statusDot = online
+            ? '<span style="color:#2ecc71">🟢 online</span>'
+            : '<span style="color:#e74c3c">🔴 offline</span>';
+          const agoStr = age < 60000 ? `${Math.floor(age/1000)}s ago` : age < 3600000 ? `${Math.floor(age/60000)}m ago` : `${Math.floor(age/3600000)}h ago`;
+          return `<tr><td style="font-weight:bold">🤖 ${name}</td><td>${statusDot}</td><td>${agoStr}</td><td>${hb.ip || '—'}</td></tr>`;
+        }).join('');
+      })()}
+    </table>
+  </div>
+
   <div class="refresh">Auto-refreshes every 0.5s &middot; <a href="/stats?json">JSON API</a></div>
 </div>
 <script>setTimeout(()=>location.reload(), 500)</script>
@@ -235,6 +259,35 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       return res.end(script);
     } catch { return json(res, 500, { error: 'script not found' }); }
+  }
+
+  // --- Heartbeat (public read, auth write) ---
+
+  // POST /heartbeat — bot checks in
+  if (req.method === 'POST' && p === '/heartbeat') {
+    if (!auth(req)) return json(res, 401, { error: 'unauthorized' });
+    try {
+      const body = await readBody(req);
+      if (!body.name) return json(res, 400, { error: 'name required' });
+      heartbeats.set(body.name, {
+        name: body.name,
+        lastSeen: new Date().toISOString(),
+        ip: req.socket.remoteAddress,
+        version: body.version || null,
+      });
+      return json(res, 200, { ok: true });
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // GET /heartbeat — who's alive (public)
+  if (req.method === 'GET' && p === '/heartbeat') {
+    const now = Date.now();
+    const result = [];
+    for (const [name, hb] of heartbeats) {
+      const age = now - new Date(hb.lastSeen).getTime();
+      result.push({ ...hb, online: age < HEARTBEAT_TIMEOUT, ageMs: age });
+    }
+    return json(res, 200, result);
   }
 
   if (!auth(req)) return json(res, 401, { error: 'unauthorized' });

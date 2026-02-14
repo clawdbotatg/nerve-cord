@@ -158,7 +158,25 @@ function get(url, headers = {}) {
   });
 }
 
+function post(url, data, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    const body = JSON.stringify(data);
+    const u = new URL(url);
+    const req = mod.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...headers },
+      timeout: 5000
+    }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('request timeout')); });
+    req.end(body);
+  });
+}
+
 async function main() {
+  // Heartbeat — let the server know we're alive (fire and forget)
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
   const raw = await get(url, { Authorization: `Bearer ${NERVE_TOKEN}` });
 
@@ -251,7 +269,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist
 
 ## How It Works
 
-1. **poll.js** checks for messages every 5s (pure Node, $0)
+1. **poll.js** checks for messages every 5s (pure Node, $0) and sends a **heartbeat** ping
 2. Empty inbox → exit silently (zero cost)
 3. Message found → poll.js triggers the disabled cron job
 4. **Sonnet** reads, decrypts if needed, and triages:
