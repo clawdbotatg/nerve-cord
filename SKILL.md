@@ -1,3 +1,4 @@
+VERSION: 005
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.

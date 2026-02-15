@@ -276,20 +276,36 @@ const server = http.createServer(async (req, res) => {
   <div class="section">
     <h2>Heartbeat</h2>
     <table>
-      <tr><th>Bot</th><th>Status</th><th>Last Seen</th><th>IP</th></tr>
+      <tr><th>Bot</th><th>Status</th><th>Last Seen</th><th>IP</th><th>Skill Ver.</th></tr>
       ${(() => {
         const now = Date.now();
         const registered = [...bots.values()].map(b => b.name);
+        // Get current skill version
+        let currentSkillVersion = 'unknown';
+        try {
+          const skill = fs.readFileSync(path.join(__dirname, 'SKILL.md'), 'utf8');
+          const versionMatch = skill.match(/^VERSION:\\s*(.+)$/m);
+          currentSkillVersion = versionMatch ? versionMatch[1].trim() : 'unknown';
+        } catch {}
+        
         return registered.map(name => {
           const hb = heartbeats.get(name);
-          if (!hb) return `<tr><td>🤖 ${name}</td><td><span style="color:#666">⚫ never seen</span></td><td>—</td><td>—</td></tr>`;
+          if (!hb) return `<tr><td>🤖 ${name}</td><td><span style="color:#666">⚫ never seen</span></td><td>—</td><td>—</td><td><span style="color:#8b949e">—</span></td></tr>`;
           const age = now - new Date(hb.lastSeen).getTime();
           const online = age < HEARTBEAT_TIMEOUT;
           const statusDot = online
             ? '<span style="color:#2ecc71">🟢 online</span>'
             : '<span style="color:#e74c3c">🔴 offline</span>';
           const agoStr = age < 60000 ? `${Math.floor(age/1000)}s ago` : age < 3600000 ? `${Math.floor(age/60000)}m ago` : `${Math.floor(age/3600000)}h ago`;
-          return `<tr><td style="font-weight:bold">🤖 ${name}</td><td>${statusDot}</td><td>${agoStr}</td><td>${hb.ip || '—'}</td></tr>`;
+          
+          // Skill version color coding
+          let skillVersionDisplay = '<span style="color:#8b949e">—</span>';
+          if (hb.skillVersion) {
+            const color = hb.skillVersion === currentSkillVersion ? '#2ecc71' : '#e74c3c';
+            skillVersionDisplay = `<span style="color:${color}">${hb.skillVersion}</span>`;
+          }
+          
+          return `<tr><td style="font-weight:bold">🤖 ${name}</td><td>${statusDot}</td><td>${agoStr}</td><td>${hb.ip || '—'}</td><td>${skillVersionDisplay}</td></tr>`;
         }).join('');
       })()}
     </table>
@@ -346,6 +362,15 @@ const server = http.createServer(async (req, res) => {
     } catch { return json(res, 500, { error: 'skill file not found' }); }
   }
 
+  if (req.method === 'GET' && p === '/skill/version') {
+    try {
+      const skill = fs.readFileSync(path.join(__dirname, 'SKILL.md'), 'utf8');
+      const versionMatch = skill.match(/^VERSION:\s*(.+)$/m);
+      const version = versionMatch ? versionMatch[1].trim() : 'unknown';
+      return json(res, 200, { version });
+    } catch { return json(res, 500, { error: 'skill file not found' }); }
+  }
+
   // GET /scripts/:name — download helper scripts (crypto.js, check.js, reply.js)
   const scriptMatch = p.match(/^\/scripts\/([a-zA-Z0-9_-]+\.js)$/);
   if (req.method === 'GET' && scriptMatch) {
@@ -372,6 +397,7 @@ const server = http.createServer(async (req, res) => {
         lastSeen: new Date().toISOString(),
         ip: req.socket.remoteAddress,
         version: body.version || null,
+        skillVersion: body.skillVersion || null,
       });
       return json(res, 200, { ok: true });
     } catch (e) { return json(res, 400, { error: e.message }); }
