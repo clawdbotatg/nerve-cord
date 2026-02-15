@@ -53,7 +53,7 @@ function request(method, url, body, headers = {}) {
 
 function encrypt(publicKeyPem, plaintext) {
   const aesKey = crypto.randomBytes(32);
-  const iv = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
   let encrypted = cipher.update(plaintext, 'utf8');
   encrypted = Buffer.concat([encrypted, cipher.final()]);

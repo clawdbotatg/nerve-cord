@@ -9,6 +9,7 @@ const { nanoid } = require('nanoid');
 
 const PORT = parseInt(process.env.PORT || '9999', 10);
 const TOKEN = process.env.TOKEN || 'nerve-cord-default-token';
+const READONLY_TOKEN = process.env.READONLY_TOKEN || '';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'messages.json');
@@ -130,7 +131,9 @@ function readBody(req) {
 
 function auth(req) {
   const h = req.headers.authorization || '';
-  return h === `Bearer ${TOKEN}`;
+  if (h === `Bearer ${TOKEN}`) return 'full';
+  if (READONLY_TOKEN && h === `Bearer ${READONLY_TOKEN}`) return 'readonly';
+  return false;
 }
 
 function formatUptime(s) {
@@ -360,7 +363,7 @@ const server = http.createServer(async (req, res) => {
 
   // POST /heartbeat — bot checks in
   if (req.method === 'POST' && p === '/heartbeat') {
-    if (!auth(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!auth(req)) return json(res, 401, { error: 'unauthorized' });  // readonly OK for heartbeat
     try {
       const body = await readBody(req);
       if (!body.name) return json(res, 400, { error: 'name required' });
@@ -385,7 +388,15 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, result);
   }
 
-  if (!auth(req)) return json(res, 401, { error: 'unauthorized' });
+  const authLevel = auth(req);
+  if (!authLevel) return json(res, 401, { error: 'unauthorized' });
+
+  // --- Read-only guard: readonly tokens can only GET + mark seen ---
+  if (authLevel === 'readonly') {
+    const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
+    const isGet = req.method === 'GET';
+    if (!isGet && !isSeen) return json(res, 403, { error: 'readonly token — write access denied' });
+  }
 
   // --- Bot Registry ---
 
