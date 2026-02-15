@@ -292,6 +292,40 @@ const server = http.createServer(async (req, res) => {
     </table>
   </div>
 
+  <div class="section">
+    <h2>🎯 Priorities</h2>
+    ${priorities.length ? `<table>
+      <tr><th>#</th><th>Priority</th><th>Set By</th></tr>
+      ${priorities.map(p => `<tr>
+        <td style="color:#58a6ff;font-weight:bold">${p.rank}</td>
+        <td>${p.text}</td>
+        <td style="color:#8b949e">${p.setBy}</td>
+      </tr>`).join('')}
+    </table>` : '<div style="color:#666;padding:4px 0">No priorities set</div>'}
+  </div>
+
+  <div class="section">
+    <h2>📝 Activity Log</h2>
+    ${(() => {
+      const recentLogs = queryLog({ limit: 10 });
+      if (!recentLogs.length) return '<div style="color:#666;padding:4px 0">No log entries yet</div>';
+      return `<table>
+        <tr><th>Time</th><th>Bot</th><th>Entry</th><th>Tags</th></tr>
+        ${recentLogs.map(e => {
+          const t = new Date(e.created);
+          const timeStr = t.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+          const tags = e.tags.length ? e.tags.map(t => `<span style="background:#1f6feb;color:#fff;padding:1px 6px;border-radius:8px;font-size:11px;margin-right:4px">${t}</span>`).join('') : '';
+          return `<tr>
+            <td style="color:#8b949e;white-space:nowrap">${timeStr}</td>
+            <td style="font-weight:bold">🤖 ${e.from}</td>
+            <td>${e.text}</td>
+            <td>${tags}</td>
+          </tr>`;
+        }).join('')}
+      </table>`;
+    })()}
+  </div>
+
   <div class="refresh">Auto-refreshes every 0.5s &middot; <a href="/stats?json">JSON API</a></div>
 </div>
 <script>setTimeout(()=>location.reload(), 500)</script>
