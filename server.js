@@ -13,7 +13,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'messages.json');
 const BOTS_FILE = path.join(DATA_DIR, 'bots.json');
-const LOG_FILE = path.join(DATA_DIR, 'log.json');
+const LOG_DIR = path.join(DATA_DIR, 'log');
 const PRIO_FILE = path.join(DATA_DIR, 'priorities.json');
 const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24h
 const SAVE_INTERVAL = 30_000; // 30s
@@ -23,8 +23,60 @@ const HEARTBEAT_TIMEOUT = 30_000; // 30s = offline
 let messages = new Map();
 let bots = new Map(); // name -> { name, publicKey, registered }
 let heartbeats = new Map(); // name -> { lastSeen, ip, version }
-let activityLog = []; // { id, from, text, tags, details, created }
 let priorities = []; // ordered array of { text, setBy, setAt }
+
+// --- Activity Log (daily files) ---
+function logDateKey(isoStr) { return isoStr.slice(0, 10); } // YYYY-MM-DD
+function logFilePath(dateKey) { return path.join(LOG_DIR, `${dateKey}.json`); }
+function readLogFile(dateKey) {
+  const fp = logFilePath(dateKey);
+  try { return fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, 'utf8')) : []; }
+  catch { return []; }
+}
+function writeLogFile(dateKey, entries) {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  fs.writeFileSync(logFilePath(dateKey), JSON.stringify(entries, null, 2));
+}
+function appendLogEntry(entry) {
+  const dk = logDateKey(entry.created);
+  const entries = readLogFile(dk);
+  entries.push(entry);
+  writeLogFile(dk, entries);
+}
+function queryLog({ date, from, tag, limit }) {
+  let dateKeys = [];
+  if (date) {
+    dateKeys = [date];
+  } else {
+    // Read all daily files
+    try {
+      dateKeys = fs.readdirSync(LOG_DIR)
+        .filter(f => f.endsWith('.json'))
+        .map(f => f.replace('.json', ''))
+        .sort().reverse();
+    } catch { dateKeys = []; }
+  }
+  let results = [];
+  for (const dk of dateKeys) {
+    results.push(...readLogFile(dk));
+  }
+  if (from) results = results.filter(e => e.from === from);
+  if (tag) results = results.filter(e => e.tags.includes(tag));
+  results.sort((a, b) => new Date(b.created) - new Date(a.created));
+  if (limit > 0) results = results.slice(0, limit);
+  return results;
+}
+function deleteLogEntry(id) {
+  try {
+    const dateKeys = fs.readdirSync(LOG_DIR).filter(f => f.endsWith('.json')).map(f => f.replace('.json', ''));
+    for (const dk of dateKeys) {
+      const entries = readLogFile(dk);
+      const idx = entries.findIndex(e => e.id === id);
+      if (idx !== -1) { entries.splice(idx, 1); writeLogFile(dk, entries); return true; }
+    }
+  } catch {}
+  return false;
+}
 
 function load() {
   try {
@@ -38,10 +90,6 @@ function load() {
       bots = new Map(raw.map(b => [b.name, b]));
       console.log(`Loaded ${bots.size} bots from disk`);
     }
-    if (fs.existsSync(LOG_FILE)) {
-      activityLog = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
-      console.log(`Loaded ${activityLog.length} log entries from disk`);
-    }
     if (fs.existsSync(PRIO_FILE)) {
       priorities = JSON.parse(fs.readFileSync(PRIO_FILE, 'utf8'));
       console.log(`Loaded ${priorities.length} priorities from disk`);
@@ -54,7 +102,6 @@ function save() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(DATA_FILE, JSON.stringify([...messages.values()], null, 2));
     fs.writeFileSync(BOTS_FILE, JSON.stringify([...bots.values()], null, 2));
-    fs.writeFileSync(LOG_FILE, JSON.stringify(activityLog, null, 2));
     fs.writeFileSync(PRIO_FILE, JSON.stringify(priorities, null, 2));
   } catch (e) { console.error('Save error:', e.message); }
 }
@@ -489,34 +536,25 @@ const server = http.createServer(async (req, res) => {
         details: body.details || null,
         created: new Date().toISOString(),
       };
-      activityLog.push(entry);
-      save();
+      appendLogEntry(entry);
       return json(res, 201, entry);
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
 
   // GET /log — read entries (filter: ?date=YYYY-MM-DD, ?from=name, ?tag=tag, ?limit=N)
   if (req.method === 'GET' && p === '/log') {
-    let results = [...activityLog];
     const date = url.searchParams.get('date');
     const from = url.searchParams.get('from');
     const tag = url.searchParams.get('tag');
     const limit = parseInt(url.searchParams.get('limit') || '0', 10);
-    if (date) results = results.filter(e => e.created.startsWith(date));
-    if (from) results = results.filter(e => e.from === from);
-    if (tag) results = results.filter(e => e.tags.includes(tag));
-    results.sort((a, b) => new Date(b.created) - new Date(a.created));
-    if (limit > 0) results = results.slice(0, limit);
+    const results = queryLog({ date, from, tag, limit });
     return json(res, 200, results);
   }
 
   // DELETE /log/:id — remove a log entry
   const logDelMatch = p.match(/^\/log\/(log_[A-Za-z0-9_-]+)$/);
   if (req.method === 'DELETE' && logDelMatch) {
-    const idx = activityLog.findIndex(e => e.id === logDelMatch[1]);
-    if (idx === -1) return json(res, 404, { error: 'not found' });
-    activityLog.splice(idx, 1);
-    save();
+    if (!deleteLogEntry(logDelMatch[1])) return json(res, 404, { error: 'not found' });
     return json(res, 200, { deleted: true });
   }
 
