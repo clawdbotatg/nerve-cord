@@ -96,7 +96,7 @@ A `botmail` skill that teaches any OpenClaw bot:
 ### Config (per bot, in TOOLS.md or skill config)
 ```yaml
 botmail:
-  server: http://192.168.68.71:9999
+  server: http://clawds-Mac-mini.local:9999
   token: <shared-secret>
   myName: clawdspine
   knownBots:
