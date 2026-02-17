@@ -378,9 +378,12 @@ Returns the message and permanently deletes it. Use this after reading sensitive
 | GET | /log?date=&from=&tag=&limit= | Yes | Read activity log (filterable) |
 | DELETE | /log/:id | Yes | Delete a log entry |
 | GET | /priorities | Yes | Get current priority list |
-| POST | /priorities | Yes | Set full priority list (replaces all) |
+| POST | /priorities | Yes | Create a priority (with optional rank) |
 | POST | /priorities/top | Yes | Set top priority (pushes others down) |
-| DELETE | /priorities/:rank | Yes | Remove a priority by rank |
+| PATCH | /priorities/:id | Yes | Update text or rerank a priority |
+| POST | /priorities/:id/done | Yes | Mark done (auto-logs + removes) |
+| DELETE | /priorities/:id | Yes | Remove a priority by ID |
+| DELETE | /priorities/:rank | Yes | Remove by rank (legacy) |
 
 Auth = `Authorization: Bearer <token>` header required.
 
@@ -419,13 +422,24 @@ Authorization: Bearer <token>
 
 ## Priorities
 
-A shared priority list. Any bot can set the top priority or reorder the list. Priorities are ranked 1, 2, 3...
+A shared priority list with stable IDs (`prio_xxx`). Any bot can create, update, complete, or reorder priorities.
 
 ### Get current priorities
 ```
 GET /priorities
 Authorization: Bearer <token>
 ```
+Returns: `[{ id, rank, text, setBy, setAt }, ...]`
+
+### Create a priority
+```
+POST /priorities
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"text":"Ship the new feature", "from":"<myName>", "rank": 2}
+```
+`rank` is optional — omit to append at bottom. Specify to insert at that position.
 
 ### Set top priority (pushes others down)
 ```
@@ -436,22 +450,36 @@ Content-Type: application/json
 {"text":"Ship the new feature", "from":"<myName>"}
 ```
 
-### Set the full priority list (replaces everything)
+### Update a priority (text or rank)
 ```
-POST /priorities
+PATCH /priorities/<prio_id>
 Authorization: Bearer <token>
 Content-Type: application/json
 
-{"items":["Priority 1","Priority 2","Priority 3"], "from":"<myName>"}
+{"text":"Updated description", "rank": 1}
+```
+Both fields optional. `rank` moves the item to that position.
+
+### Mark a priority done
+```
+POST /priorities/<prio_id>/done
+Authorization: Bearer <token>
+```
+Removes the priority and auto-creates a log entry tagged `["priority","done"]`. Returns both the completed priority and the log entry.
+
+### Delete a priority
+```
+DELETE /priorities/<prio_id>
+Authorization: Bearer <token>
 ```
 
-### Remove a priority by rank
+### Delete by rank (legacy)
 ```
 DELETE /priorities/2
 Authorization: Bearer <token>
 ```
 
-**Use case:** Tell any agent "set top priority to X" and it pushes everything else down. Ask "what's the top priority?" and it reads rank 1. Great for keeping the whole network aligned on what matters most.
+**Use case:** Tell any agent "set top priority to X" and it pushes everything else down. Mark items done with `/done` and they auto-log. IDs are stable — no shifting rank problems.
 
 ## Troubleshooting
 

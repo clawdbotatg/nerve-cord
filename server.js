@@ -93,7 +93,13 @@ function load() {
     }
     if (fs.existsSync(PRIO_FILE)) {
       priorities = JSON.parse(fs.readFileSync(PRIO_FILE, 'utf8'));
-      console.log(`Loaded ${priorities.length} priorities from disk`);
+      // Migrate: add IDs to any priorities missing them
+      let migrated = false;
+      priorities.forEach(p => {
+        if (!p.id) { p.id = `prio_${nanoid(12)}`; migrated = true; }
+      });
+      if (migrated) save();
+      console.log(`Loaded ${priorities.length} priorities from disk${migrated ? ' (migrated to stable IDs)' : ''}`);
     }
   } catch (e) { console.error('Load error:', e.message); }
 }
@@ -105,6 +111,10 @@ function save() {
     fs.writeFileSync(BOTS_FILE, JSON.stringify([...bots.values()], null, 2));
     fs.writeFileSync(PRIO_FILE, JSON.stringify(priorities, null, 2));
   } catch (e) { console.error('Save error:', e.message); }
+}
+
+function rerank() {
+  priorities.forEach((p, i) => p.rank = i + 1);
 }
 
 function expire() {
@@ -636,21 +646,25 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, priorities);
   }
 
-  // POST /priorities — set the full priority list (replaces all)
-  // Body: { items: ["thing1", "thing2", "thing3"], from: "botname" }
+  // POST /priorities — create a new priority
+  // Body: { text: "the thing", from: "botname", rank: 1 (optional, default: append) }
   if (req.method === 'POST' && p === '/priorities') {
     try {
       const body = await readBody(req);
-      if (!body.items || !Array.isArray(body.items)) return json(res, 400, { error: 'items array required' });
+      if (!body.text) return json(res, 400, { error: 'text required' });
       const now = new Date().toISOString();
-      priorities = body.items.map((text, i) => ({
-        rank: i + 1,
-        text,
+      const entry = {
+        id: `prio_${nanoid(12)}`,
+        text: body.text,
         setBy: body.from || 'unknown',
         setAt: now,
-      }));
+      };
+      // Insert at specified rank or append
+      const targetRank = body.rank ? Math.max(1, Math.min(body.rank, priorities.length + 1)) : priorities.length + 1;
+      priorities.splice(targetRank - 1, 0, entry);
+      rerank();
       save();
-      return json(res, 200, priorities);
+      return json(res, 201, entry);
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
 
@@ -661,29 +675,83 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body.text) return json(res, 400, { error: 'text required' });
       const now = new Date().toISOString();
-      // Remove if already in list
+      // Remove if already in list (by text match)
       priorities = priorities.filter(p => p.text !== body.text);
-      // Insert at top
-      priorities.unshift({
-        rank: 1,
+      const entry = {
+        id: `prio_${nanoid(12)}`,
         text: body.text,
         setBy: body.from || 'unknown',
         setAt: now,
-      });
-      // Re-rank
-      priorities.forEach((p, i) => p.rank = i + 1);
+      };
+      priorities.unshift(entry);
+      rerank();
       save();
       return json(res, 200, priorities);
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
 
-  // DELETE /priorities/:rank — remove a priority by rank (1-indexed)
+  // Priority routes by ID
+  const prioIdMatch = p.match(/^\/priorities\/(prio_[A-Za-z0-9_-]+)(\/done)?$/);
+  if (prioIdMatch) {
+    const prioId = prioIdMatch[1];
+    const isDone = prioIdMatch[2] === '/done';
+    const idx = priorities.findIndex(p => p.id === prioId);
+
+    // POST /priorities/:id/done — mark complete, auto-log, remove
+    if (req.method === 'POST' && isDone) {
+      if (idx === -1) return json(res, 404, { error: 'priority not found' });
+      const completed = priorities.splice(idx, 1)[0];
+      rerank();
+      save();
+      // Auto-log completion
+      const logEntry = {
+        id: `log_${nanoid(12)}`,
+        from: completed.setBy,
+        text: `Priority completed: ${completed.text}`,
+        tags: ['priority', 'done'],
+        details: null,
+        created: new Date().toISOString(),
+      };
+      appendLogEntry(logEntry);
+      return json(res, 200, { completed, logged: logEntry });
+    }
+
+    // PATCH /priorities/:id — update text or rerank
+    if (req.method === 'PATCH' && !isDone) {
+      if (idx === -1) return json(res, 404, { error: 'priority not found' });
+      try {
+        const body = await readBody(req);
+        if (body.text) priorities[idx].text = body.text;
+        if (body.from) priorities[idx].setBy = body.from;
+        // Move to new rank if specified
+        if (body.rank && body.rank !== priorities[idx].rank) {
+          const [item] = priorities.splice(idx, 1);
+          const newIdx = Math.max(0, Math.min(body.rank - 1, priorities.length));
+          priorities.splice(newIdx, 0, item);
+          rerank();
+        }
+        save();
+        return json(res, 200, priorities[priorities.findIndex(p => p.id === prioId)]);
+      } catch (e) { return json(res, 400, { error: e.message }); }
+    }
+
+    // DELETE /priorities/:id — remove by ID
+    if (req.method === 'DELETE' && !isDone) {
+      if (idx === -1) return json(res, 404, { error: 'priority not found' });
+      priorities.splice(idx, 1);
+      rerank();
+      save();
+      return json(res, 200, priorities);
+    }
+  }
+
+  // DELETE /priorities/:rank — remove by rank (legacy, still works)
   const prioDelMatch = p.match(/^\/priorities\/(\d+)$/);
   if (req.method === 'DELETE' && prioDelMatch) {
     const rank = parseInt(prioDelMatch[1], 10);
     if (rank < 1 || rank > priorities.length) return json(res, 404, { error: 'rank out of range' });
     priorities.splice(rank - 1, 1);
-    priorities.forEach((p, i) => p.rank = i + 1);
+    rerank();
     save();
     return json(res, 200, priorities);
   }
