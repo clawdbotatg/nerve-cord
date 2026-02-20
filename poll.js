@@ -146,4 +146,5 @@ async function main() {
 main().catch(e => {
   console.error(`[${new Date().toISOString()}] Poll error (will retry): ${e.message}`);
   try { fs.unlinkSync(LOCK_FILE); } catch {}
+  try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
 }).finally(() => process.exit(0));
