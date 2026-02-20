@@ -64,7 +64,9 @@ function post(url, data, headers = {}) {
 const fs = require('fs');
 const LOCK_FILE = '/tmp/nervecord-poll.lock';
 const COOLDOWN_FILE = '/tmp/nervecord-poll.cooldown';
-const COOLDOWN_MS = 120000; // 2 min cooldown after failure
+const COOLDOWN_MS_BASE = 120000; // 2 min base cooldown after failure
+const COOLDOWN_MS_MAX = 900000; // 15 min max cooldown
+const FAIL_COUNT_FILE = '/tmp/nervecord-poll.failcount';
 
 function isLocked() {
   try {
@@ -75,11 +77,31 @@ function isLocked() {
   } catch { return false; }
 }
 
+function getFailCount() {
+  try { return parseInt(fs.readFileSync(FAIL_COUNT_FILE, 'utf8')) || 0; } catch { return 0; }
+}
+
+function setFailCount(n) {
+  try { fs.writeFileSync(FAIL_COUNT_FILE, String(n)); } catch {}
+}
+
+function resetFailCount() {
+  try { fs.unlinkSync(FAIL_COUNT_FILE); } catch {}
+  try { fs.unlinkSync(COOLDOWN_FILE); } catch {}
+}
+
+function getCooldownMs() {
+  const fails = getFailCount();
+  // Exponential backoff: 2min, 4min, 8min, capped at 15min
+  return Math.min(COOLDOWN_MS_BASE * Math.pow(2, fails), COOLDOWN_MS_MAX);
+}
+
 function isInCooldown() {
   try {
     const stat = fs.statSync(COOLDOWN_FILE);
     const ageMs = Date.now() - stat.mtimeMs;
-    if (ageMs > COOLDOWN_MS) { fs.unlinkSync(COOLDOWN_FILE); return false; }
+    const cooldownMs = getCooldownMs();
+    if (ageMs > cooldownMs) { fs.unlinkSync(COOLDOWN_FILE); return false; }
     return true;
   } catch { return false; }
 }
@@ -91,7 +113,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '015', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '016', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -132,15 +154,25 @@ async function main() {
 
   try {
     const SCRIPTS_DIR = require('path').dirname(require.resolve('./poll.js'));
-    const message = `Check nerve cord inbox and process pending messages. Run 'cd ${SCRIPTS_DIR} && BOTNAME=${NERVE_BOTNAME} TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js' to see them. Read the SKILL.md at ${SCRIPTS_DIR}/SKILL.md if it exists, or fetch it from ${NERVE_SERVER}/skill for full API docs. Decrypt messages, handle requests, and reply (encrypted) if needed. For complex tasks, use sessions_spawn with opus model. Mark messages as seen after handling. Only reply when genuinely needed — no acks or filler.`;
+    const message = `Nerve cord: pending messages. Check: cd ${SCRIPTS_DIR} && BOTNAME=${NERVE_BOTNAME} TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js
+
+If encrypted, decrypt: node ${SCRIPTS_DIR}/crypto.js decrypt ${SCRIPTS_DIR}/keys/${NERVE_BOTNAME}.key "<body>"
+To reply: TOKEN=${NERVE_TOKEN} BOTNAME=${NERVE_BOTNAME} SERVER=${NERVE_SERVER} node ${SCRIPTS_DIR}/send.js <recipient> "Re: <subject>" "<reply>"
+Mark seen: curl -s -X POST ${NERVE_SERVER}/messages/<id>/seen -H 'Authorization: Bearer ${NERVE_TOKEN}'
+
+Rules: Mark all messages seen after handling. Only reply if a reply was requested. For complex tasks, spawn opus. No acks or filler.`;
 
     const result = execSync(
-      `PATH=${NODE_BIN}:$PATH openclaw agent --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 120`,
-      { encoding: 'utf8', timeout: 130000 }
+      `PATH=${NODE_BIN}:$PATH openclaw agent --agent ${NERVE_BOTNAME} --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 180`,
+      { encoding: 'utf8', timeout: 190000 }
     );
     console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
+    resetFailCount();
   } catch (e) {
-    console.error(`[${new Date().toISOString()}] Agent failed: ${e.message.substring(0, 200)}`);
+    const fails = getFailCount() + 1;
+    setFailCount(fails);
+    const nextCooldown = Math.min(COOLDOWN_MS_BASE * Math.pow(2, fails), COOLDOWN_MS_MAX);
+    console.error(`[${new Date().toISOString()}] Agent failed (attempt ${fails}, cooldown ${Math.round(nextCooldown/1000)}s): ${e.message.substring(0, 200)}`);
     // Set cooldown so we don't hammer the API
     try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
   } finally {
@@ -152,5 +184,6 @@ async function main() {
 main().catch(e => {
   console.error(`[${new Date().toISOString()}] Poll error (will retry): ${e.message}`);
   try { fs.unlinkSync(LOCK_FILE); } catch {}
+  setFailCount(getFailCount() + 1);
   try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
 }).finally(() => process.exit(0));
