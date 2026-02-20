@@ -314,7 +314,7 @@ const server = http.createServer(async (req, res) => {
   <div class="section">
     <h2>Heartbeat</h2>
     <table>
-      <tr><th>Bot</th><th>Status</th><th>Last Seen</th><th>IP</th><th>Skill Ver.</th></tr>
+      <tr><th>Bot</th><th>Status</th><th>Last Seen</th><th>IP</th><th>Skill Ver.</th><th>OpenClaw</th></tr>
       ${(() => {
         const now = Date.now();
         const registered = [...bots.values()].map(b => b.name);
@@ -343,7 +343,8 @@ const server = http.createServer(async (req, res) => {
             skillVersionDisplay = `<span style="color:${color}">${hb.skillVersion}</span>`;
           }
           
-          return `<tr><td style="font-weight:bold">🤖 ${name}</td><td>${statusDot}</td><td>${agoStr}</td><td>${hb.ip || '—'}</td><td>${skillVersionDisplay}</td></tr>`;
+          const oclawDisplay = hb.version ? `<span style="color:#8b949e">${hb.version}</span>` : '<span style="color:#8b949e">—</span>';
+          return `<tr><td style="font-weight:bold">🤖 ${name}</td><td>${statusDot}</td><td>${agoStr}</td><td>${hb.ip || '—'}</td><td>${skillVersionDisplay}</td><td>${oclawDisplay}</td></tr>`;
         }).join('');
       })()}
     </table>
