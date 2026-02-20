@@ -114,7 +114,7 @@ async function main() {
     const message = `Check nerve cord inbox and process pending messages. Run 'cd /Users/clawd/clawd/nerve-cord && BOTNAME=clawdheart TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js' to see them. Read the SKILL.md at /Users/clawd/clawd/nerve-cord/SKILL.md for full API docs. Decrypt messages, handle requests, and reply (encrypted) if needed. For complex tasks, use sessions_spawn with opus model. Mark messages as seen after handling. Only reply when genuinely needed — no acks or filler.`;
 
     const result = execSync(
-      `PATH=${NODE_BIN}:$PATH openclaw agent --message ${JSON.stringify(message)} --timeout 120`,
+      `PATH=${NODE_BIN}:$PATH openclaw agent --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 120`,
       { encoding: 'utf8', timeout: 130000 }
     );
     console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
