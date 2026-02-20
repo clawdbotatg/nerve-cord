@@ -460,7 +460,9 @@ const server = http.createServer(async (req, res) => {
   // --- Read-only guard: readonly tokens can only GET + mark seen + post suggestions ---
   if (authLevel === 'readonly') {
     const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
-    const isSuggestion = req.method === 'POST' && p === '/suggestions';
+    const isSuggestion = (req.method === 'POST' && p === '/suggestions') ||
+                         (req.method === 'DELETE' && /^\/suggestions\/sug_[A-Za-z0-9_-]+$/.test(p)) ||
+                         (req.method === 'PATCH' && /^\/suggestions\/sug_[A-Za-z0-9_-]+$/.test(p));
     const isGet = req.method === 'GET';
     if (!isGet && !isSeen && !isSuggestion) return json(res, 403, { error: 'readonly token — write access denied' });
   }
@@ -820,7 +822,20 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, s);
   }
 
-  // DELETE /suggestions/:id — remove a suggestion (full token only)
+  // PATCH /suggestions/:id — update a suggestion (readonly OK)
+  if (req.method === 'PATCH' && sugGetMatch) {
+    const idx = suggestions.findIndex(s => s.id === sugGetMatch[1]);
+    if (idx === -1) return json(res, 404, { error: 'suggestion not found' });
+    try {
+      const body = await readBody(req);
+      if (body.title) suggestions[idx].title = body.title;
+      if (body.body !== undefined) suggestions[idx].body = body.body;
+      save();
+      return json(res, 200, suggestions[idx]);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // DELETE /suggestions/:id — remove a suggestion (readonly OK)
   if (req.method === 'DELETE' && sugGetMatch) {
     const idx = suggestions.findIndex(s => s.id === sugGetMatch[1]);
     if (idx === -1) return json(res, 404, { error: 'suggestion not found' });
