@@ -2,6 +2,16 @@
 // Nerve Cord — Inter-bot message broker with E2E encryption
 // Usage: PORT=9999 TOKEN=secret node server.js
 
+// Load .env if present
+const envPath = require('path').join(__dirname, '.env');
+try {
+  const envContent = require('fs').readFileSync(envPath, 'utf8');
+  envContent.split('\n').forEach(line => {
+    const match = line.match(/^([A-Z_]+)=(.*)$/);
+    if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+  });
+} catch {}
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +26,7 @@ const DATA_FILE = path.join(DATA_DIR, 'messages.json');
 const BOTS_FILE = path.join(DATA_DIR, 'bots.json');
 const LOG_DIR = path.join(DATA_DIR, 'log');
 const PRIO_FILE = path.join(DATA_DIR, 'priorities.json');
+const SUGGESTIONS_FILE = path.join(DATA_DIR, 'suggestions.json');
 const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24h
 const SAVE_INTERVAL = 30_000; // 30s
 const HEARTBEAT_TIMEOUT = 30_000; // 30s = offline
@@ -25,6 +36,7 @@ let messages = new Map();
 let bots = new Map(); // name -> { name, publicKey, registered }
 let heartbeats = new Map(); // name -> { lastSeen, ip, version }
 let priorities = []; // ordered array of { text, setBy, setAt }
+let suggestions = []; // community suggestions: { id, title, body, from, created }
 
 // --- Activity Log (daily files) ---
 function logDateKey(isoStr) { return isoStr.slice(0, 10); } // YYYY-MM-DD
@@ -101,6 +113,10 @@ function load() {
       if (migrated) save();
       console.log(`Loaded ${priorities.length} priorities from disk${migrated ? ' (migrated to stable IDs)' : ''}`);
     }
+    if (fs.existsSync(SUGGESTIONS_FILE)) {
+      suggestions = JSON.parse(fs.readFileSync(SUGGESTIONS_FILE, 'utf8'));
+      console.log(`Loaded ${suggestions.length} suggestions from disk`);
+    }
   } catch (e) { console.error('Load error:', e.message); }
 }
 
@@ -110,6 +126,7 @@ function save() {
     fs.writeFileSync(DATA_FILE, JSON.stringify([...messages.values()], null, 2));
     fs.writeFileSync(BOTS_FILE, JSON.stringify([...bots.values()], null, 2));
     fs.writeFileSync(PRIO_FILE, JSON.stringify(priorities, null, 2));
+    fs.writeFileSync(SUGGESTIONS_FILE, JSON.stringify(suggestions, null, 2));
   } catch (e) { console.error('Save error:', e.message); }
 }
 
@@ -334,6 +351,19 @@ const server = http.createServer(async (req, res) => {
   </div>
 
   <div class="section">
+    <h2>💡 Community Suggestions</h2>
+    ${suggestions.length ? `<table>
+      <tr><th>#</th><th>Title</th><th>From</th><th>Date</th></tr>
+      ${suggestions.map((s, i) => `<tr>
+        <td style="color:#58a6ff;font-weight:bold">${i + 1}</td>
+        <td>${s.title}</td>
+        <td style="color:#8b949e">${s.from}</td>
+        <td style="color:#8b949e">${new Date(s.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</td>
+      </tr>`).join('')}
+    </table>` : '<div style="color:#666;padding:4px 0">No suggestions yet</div>'}
+  </div>
+
+  <div class="section">
     <h2>📝 Activity Log</h2>
     ${(() => {
       const recentLogs = queryLog({ limit: 10 });
@@ -427,11 +457,12 @@ const server = http.createServer(async (req, res) => {
   const authLevel = auth(req);
   if (!authLevel) return json(res, 401, { error: 'unauthorized' });
 
-  // --- Read-only guard: readonly tokens can only GET + mark seen ---
+  // --- Read-only guard: readonly tokens can only GET + mark seen + post suggestions ---
   if (authLevel === 'readonly') {
     const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
+    const isSuggestion = req.method === 'POST' && p === '/suggestions';
     const isGet = req.method === 'GET';
-    if (!isGet && !isSeen) return json(res, 403, { error: 'readonly token — write access denied' });
+    if (!isGet && !isSeen && !isSuggestion) return json(res, 403, { error: 'readonly token — write access denied' });
   }
 
   // --- Bot Registry ---
@@ -754,6 +785,48 @@ const server = http.createServer(async (req, res) => {
     rerank();
     save();
     return json(res, 200, priorities);
+  }
+
+  // --- Community Suggestions ---
+
+  // GET /suggestions — list all suggestions (title + body)
+  if (req.method === 'GET' && p === '/suggestions') {
+    return json(res, 200, suggestions);
+  }
+
+  // POST /suggestions — add a suggestion (readonly OK)
+  if (req.method === 'POST' && p === '/suggestions') {
+    try {
+      const body = await readBody(req);
+      if (!body.title) return json(res, 400, { error: 'title required' });
+      const entry = {
+        id: `sug_${nanoid(12)}`,
+        title: body.title,
+        body: body.body || '',
+        from: body.from || 'anonymous',
+        created: new Date().toISOString(),
+      };
+      suggestions.push(entry);
+      save();
+      return json(res, 201, entry);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // GET /suggestions/:id — get a single suggestion
+  const sugGetMatch = p.match(/^\/suggestions\/(sug_[A-Za-z0-9_-]+)$/);
+  if (req.method === 'GET' && sugGetMatch) {
+    const s = suggestions.find(s => s.id === sugGetMatch[1]);
+    if (!s) return json(res, 404, { error: 'suggestion not found' });
+    return json(res, 200, s);
+  }
+
+  // DELETE /suggestions/:id — remove a suggestion (full token only)
+  if (req.method === 'DELETE' && sugGetMatch) {
+    const idx = suggestions.findIndex(s => s.id === sugGetMatch[1]);
+    if (idx === -1) return json(res, 404, { error: 'suggestion not found' });
+    const removed = suggestions.splice(idx, 1)[0];
+    save();
+    return json(res, 200, { deleted: removed });
   }
 
   json(res, 404, { error: 'not found' });
