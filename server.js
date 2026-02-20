@@ -20,6 +20,7 @@ const { nanoid } = require('nanoid');
 const PORT = parseInt(process.env.PORT || '9999', 10);
 const TOKEN = process.env.TOKEN || 'nerve-cord-default-token';
 const READONLY_TOKEN = process.env.READONLY_TOKEN || '';
+const LARVA_TOKEN = process.env.LARVA_TOKEN || '';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'messages.json');
@@ -28,6 +29,7 @@ const LOG_DIR = path.join(DATA_DIR, 'log');
 const PRIO_FILE = path.join(DATA_DIR, 'priorities.json');
 const SUGGESTIONS_FILE = path.join(DATA_DIR, 'suggestions.json');
 const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24h
+const LARVA_EXPIRY_MS = 60 * 60 * 1000; // 1h — larvae expire after no heartbeat
 const SAVE_INTERVAL = 30_000; // 30s
 const HEARTBEAT_TIMEOUT = 30_000; // 30s = offline
 
@@ -37,6 +39,7 @@ let bots = new Map(); // name -> { name, publicKey, registered }
 let heartbeats = new Map(); // name -> { lastSeen, ip, version }
 let priorities = []; // ordered array of { text, setBy, setAt }
 let suggestions = []; // community suggestions: { id, title, body, from, created }
+let larvae = new Map(); // name -> { name, task, status, registered, lastSeen, ip }
 
 // --- Activity Log (daily files) ---
 function logDateKey(isoStr) { return isoStr.slice(0, 10); } // YYYY-MM-DD
@@ -159,6 +162,7 @@ function readBody(req) {
 function auth(req) {
   const h = req.headers.authorization || '';
   if (h === `Bearer ${TOKEN}`) return 'full';
+  if (LARVA_TOKEN && h === `Bearer ${LARVA_TOKEN}`) return 'larva';
   if (READONLY_TOKEN && h === `Bearer ${READONLY_TOKEN}`) return 'readonly';
   return false;
 }
@@ -351,6 +355,31 @@ const server = http.createServer(async (req, res) => {
   </div>
 
   <div class="section">
+    <h2>🐛 Larvae</h2>
+    ${(() => {
+      const now = Date.now();
+      const allLarvae = [...larvae.values()];
+      const active = allLarvae.filter(l => now - new Date(l.lastSeen).getTime() < LARVA_EXPIRY_MS);
+      const expired = allLarvae.filter(l => now - new Date(l.lastSeen).getTime() >= LARVA_EXPIRY_MS);
+      if (!allLarvae.length) return '<div style="color:#666;padding:4px 0">No larvae registered</div>';
+      const statusColors = { starting: '#e67e22', working: '#3498db', done: '#2ecc71', error: '#e74c3c' };
+      const rows = active.map(l => {
+        const age = now - new Date(l.lastSeen).getTime();
+        const agoStr = age < 60000 ? Math.floor(age/1000) + 's ago' : age < 3600000 ? Math.floor(age/60000) + 'm ago' : Math.floor(age/3600000) + 'h ago';
+        const color = statusColors[l.status] || '#95a5a6';
+        return '<tr>' +
+          '<td style="font-weight:bold">🐛 ' + l.name + '</td>' +
+          '<td><span style="color:' + color + '">' + l.status + '</span></td>' +
+          '<td>' + (l.task || '—') + '</td>' +
+          '<td style="color:#8b949e">' + agoStr + '</td>' +
+          '</tr>';
+      }).join('');
+      return '<div style="margin-bottom:8px;color:#8b949e;font-size:13px">' + active.length + ' active' + (expired.length ? ', ' + expired.length + ' expired' : '') + '</div>' +
+        (active.length ? '<table><tr><th>Name</th><th>Status</th><th>Task</th><th>Last Seen</th></tr>' + rows + '</table>' : '<div style="color:#666;padding:4px 0">No active larvae</div>');
+    })()}
+  </div>
+
+  <div class="section">
     <h2>💡 Community Suggestions</h2>
     ${suggestions.length ? `<table>
       <tr><th>#</th><th>Title</th><th>From</th><th>Date</th></tr>
@@ -439,6 +468,14 @@ const server = http.createServer(async (req, res) => {
         version: body.version || null,
         skillVersion: body.skillVersion || null,
       });
+      // Also update larva lastSeen if this is a registered larva
+      if (larvae.has(body.name)) {
+        const l = larvae.get(body.name);
+        l.lastSeen = new Date().toISOString();
+        l.ip = req.socket.remoteAddress;
+        if (body.status) l.status = body.status;
+        if (body.task) l.task = body.task;
+      }
       return json(res, 200, { ok: true });
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
@@ -457,7 +494,7 @@ const server = http.createServer(async (req, res) => {
   const authLevel = auth(req);
   if (!authLevel) return json(res, 401, { error: 'unauthorized' });
 
-  // --- Read-only guard: readonly tokens can only GET + mark seen + post suggestions ---
+  // --- Read-only guard: readonly tokens can only GET + mark seen + suggestions ---
   if (authLevel === 'readonly') {
     const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
     const isSuggestion = (req.method === 'POST' && p === '/suggestions') ||
@@ -465,6 +502,22 @@ const server = http.createServer(async (req, res) => {
                          (req.method === 'PATCH' && /^\/suggestions\/sug_[A-Za-z0-9_-]+$/.test(p));
     const isGet = req.method === 'GET';
     if (!isGet && !isSeen && !isSuggestion) return json(res, 403, { error: 'readonly token — write access denied' });
+  }
+
+  // --- Larva guard: can GET + suggestions + log + heartbeat + register as larva ---
+  if (authLevel === 'larva') {
+    const isGet = req.method === 'GET';
+    const isSuggestion = (req.method === 'POST' && p === '/suggestions') ||
+                         (req.method === 'DELETE' && /^\/suggestions\/sug_[A-Za-z0-9_-]+$/.test(p)) ||
+                         (req.method === 'PATCH' && /^\/suggestions\/sug_[A-Za-z0-9_-]+$/.test(p));
+    const isLog = req.method === 'POST' && p === '/log';
+    const isHeartbeat = req.method === 'POST' && p === '/heartbeat';
+    const isLarvaRegister = req.method === 'POST' && p === '/larvae';
+    const isLarvaUpdate = req.method === 'PATCH' && /^\/larvae\/[a-zA-Z0-9_-]+$/.test(p);
+    const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
+    if (!isGet && !isSuggestion && !isLog && !isHeartbeat && !isLarvaRegister && !isLarvaUpdate && !isSeen) {
+      return json(res, 403, { error: 'larva token — limited write access' });
+    }
   }
 
   // --- Bot Registry ---
@@ -787,6 +840,66 @@ const server = http.createServer(async (req, res) => {
     rerank();
     save();
     return json(res, 200, priorities);
+  }
+
+  // --- Larvae ---
+
+  // POST /larvae — register a larva
+  if (req.method === 'POST' && p === '/larvae') {
+    try {
+      const body = await readBody(req);
+      if (!body.name) return json(res, 400, { error: 'name required' });
+      const now = new Date().toISOString();
+      const existing = larvae.get(body.name);
+      const larva = {
+        name: body.name,
+        task: body.task || '',
+        status: body.status || 'starting',
+        registered: existing?.registered || now,
+        lastSeen: now,
+        ip: req.socket.remoteAddress,
+      };
+      larvae.set(body.name, larva);
+      return json(res, 201, larva);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // GET /larvae — list all larvae (optionally ?active=true for non-expired only)
+  if (req.method === 'GET' && p === '/larvae') {
+    const now = Date.now();
+    let result = [...larvae.values()];
+    if (url.searchParams.get('active') === 'true') {
+      result = result.filter(l => now - new Date(l.lastSeen).getTime() < LARVA_EXPIRY_MS);
+    }
+    return json(res, 200, result);
+  }
+
+  // GET /larvae/:name — get a specific larva
+  const larvaGetMatch = p.match(/^\/larvae\/([a-zA-Z0-9_-]+)$/);
+  if (req.method === 'GET' && larvaGetMatch) {
+    const l = larvae.get(larvaGetMatch[1]);
+    if (!l) return json(res, 404, { error: 'larva not found' });
+    return json(res, 200, l);
+  }
+
+  // PATCH /larvae/:name — update task/status
+  if (req.method === 'PATCH' && larvaGetMatch) {
+    const l = larvae.get(larvaGetMatch[1]);
+    if (!l) return json(res, 404, { error: 'larva not found' });
+    try {
+      const body = await readBody(req);
+      if (body.task !== undefined) l.task = body.task;
+      if (body.status !== undefined) l.status = body.status;
+      l.lastSeen = new Date().toISOString();
+      return json(res, 200, l);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // DELETE /larvae/:name — remove a larva (full token only)
+  if (req.method === 'DELETE' && larvaGetMatch) {
+    if (!larvae.has(larvaGetMatch[1])) return json(res, 404, { error: 'larva not found' });
+    larvae.delete(larvaGetMatch[1]);
+    return json(res, 200, { deleted: larvaGetMatch[1] });
   }
 
   // --- Community Suggestions ---
