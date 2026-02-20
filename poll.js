@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Nerve Cord lightweight poller — no AI cost when inbox is empty
-// Checks for pending messages; if found, triggers an OpenClaw cron job to handle them.
-// Run on a system interval (launchd). Zero AI cost when idle.
+// Checks for pending messages; if found, triggers an OpenClaw agent turn directly.
+// No cron job dependency — gateway restarts don't break anything.
+// Run on a system interval (launchd every 15s). Zero AI cost when idle.
 //
 // IMPORTANT: Always exits 0 — even on errors. This prevents launchd/systemd from
 // throttling the polling interval after transient failures (e.g. server restart).
@@ -9,11 +10,11 @@
 // Required env:
 //   NERVE_TOKEN       — nerve-cord bearer token
 //   NERVE_BOTNAME     — this bot's name
-//   OPENCLAW_CRON_ID  — the cron job ID to trigger
 //
 // Optional env:
 //   NERVE_SERVER      — nerve-cord server (default: http://localhost:9999)
 //   NODE_PATH         — path to node binary dir (for openclaw CLI)
+//   AGENT_MODEL       — model for agent turn (default: sonnet)
 
 const http = require('http');
 const https = require('https');
@@ -22,12 +23,12 @@ const { execSync } = require('child_process');
 const NERVE_SERVER = process.env.NERVE_SERVER || 'http://localhost:9999';
 const NERVE_TOKEN = process.env.NERVE_TOKEN;
 const NERVE_BOTNAME = process.env.NERVE_BOTNAME;
-const CRON_ID = process.env.OPENCLAW_CRON_ID;
 const NODE_BIN = process.env.NODE_PATH || '/opt/homebrew/opt/node@22/bin';
+const AGENT_MODEL = process.env.AGENT_MODEL || 'sonnet';
 
-if (!NERVE_TOKEN || !NERVE_BOTNAME || !CRON_ID) {
-  console.error('Required: NERVE_TOKEN, NERVE_BOTNAME, OPENCLAW_CRON_ID');
-  process.exit(0); // Exit 0 even on config error — don't let launchd throttle
+if (!NERVE_TOKEN || !NERVE_BOTNAME) {
+  console.error('Required: NERVE_TOKEN, NERVE_BOTNAME');
+  process.exit(0);
 }
 
 function get(url, headers = {}) {
@@ -58,9 +59,23 @@ function post(url, data, headers = {}) {
   });
 }
 
+// Lock file to prevent overlapping agent runs
+const fs = require('fs');
+const LOCK_FILE = '/tmp/nervecord-poll.lock';
+
+function isLocked() {
+  try {
+    const stat = fs.statSync(LOCK_FILE);
+    const ageMs = Date.now() - stat.mtimeMs;
+    // Stale lock (>2 min) — remove it
+    if (ageMs > 120000) { fs.unlinkSync(LOCK_FILE); return false; }
+    return true;
+  } catch { return false; }
+}
+
 async function main() {
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '005' }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '011' }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -68,50 +83,50 @@ async function main() {
 
   let msgs;
   try { msgs = JSON.parse(raw); } catch (e) {
-    // Server might be restarting — silently exit, try again next cycle
-    return;
+    return; // Server might be restarting
   }
 
-  // Loop prevention: mark loopy messages as seen (so they don't sit pending forever)
-  // then filter them out before deciding whether to trigger the agent.
-  const dominated = [];
+  // Loop prevention: mark loopy messages as seen, filter them out
   const actionable = [];
   for (const m of msgs) {
     const subj = m.subject || '';
     if ((m.from === NERVE_BOTNAME && subj.startsWith('Re:')) || subj.startsWith('Re: Re:')) {
-      dominated.push(m);
+      post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
     } else {
       actionable.push(m);
     }
   }
-  // Mark loopy messages as seen (fire and forget)
-  for (const m of dominated) {
-    post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
-  }
-  msgs = actionable.slice(0, 3);
 
-  if (!msgs.length) {
-    // Empty inbox — exit silently, zero cost
+  if (!actionable.length) return; // Empty inbox — zero cost
+
+  // Don't overlap — if an agent is already running, skip this cycle
+  if (isLocked()) {
+    console.log(`[${new Date().toISOString()}] Agent already running, skipping...`);
     return;
   }
 
-  // Messages found — trigger the OpenClaw cron job
-  console.log(`[${new Date().toISOString()}] ${msgs.length} message(s) pending, triggering agent...`);
+  console.log(`[${new Date().toISOString()}] ${actionable.length} message(s) pending, triggering agent...`);
+
+  // Create lock
+  fs.writeFileSync(LOCK_FILE, String(process.pid));
 
   try {
+    const message = `Check nerve cord inbox and process pending messages. Run 'cd /Users/clawd/clawd/nerve-cord && BOTNAME=clawdheart TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js' to see them. Read the SKILL.md at /Users/clawd/clawd/nerve-cord/SKILL.md for full API docs. Decrypt messages, handle requests, and reply (encrypted) if needed. For complex tasks, use sessions_spawn with opus model. Mark messages as seen after handling. Only reply when genuinely needed — no acks or filler.`;
+
     const result = execSync(
-      `PATH=${NODE_BIN}:$PATH openclaw cron run ${CRON_ID} --timeout 60000`,
-      { encoding: 'utf8', timeout: 70000 }
+      `PATH=${NODE_BIN}:$PATH openclaw agent --message ${JSON.stringify(message)} --timeout 120`,
+      { encoding: 'utf8', timeout: 130000 }
     );
-    console.log(`Agent triggered. ${result.trim()}`);
+    console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
   } catch (e) {
-    console.error(`[${new Date().toISOString()}] Trigger failed: ${e.message}`);
-    // Don't exit 1 — launchd will throttle us
+    console.error(`[${new Date().toISOString()}] Agent failed: ${e.message}`);
+  } finally {
+    // Always remove lock
+    try { fs.unlinkSync(LOCK_FILE); } catch {}
   }
 }
 
-// ALWAYS exit 0 — transient errors (server restart, network blip) should not
-// cause launchd to throttle our polling interval. We'll retry next cycle.
 main().catch(e => {
   console.error(`[${new Date().toISOString()}] Poll error (will retry): ${e.message}`);
+  try { fs.unlinkSync(LOCK_FILE); } catch {}
 }).finally(() => process.exit(0));
