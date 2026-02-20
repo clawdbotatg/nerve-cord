@@ -60,15 +60,26 @@ function post(url, data, headers = {}) {
 }
 
 // Lock file to prevent overlapping agent runs
+// Cooldown file to back off after failures (don't hammer API)
 const fs = require('fs');
 const LOCK_FILE = '/tmp/nervecord-poll.lock';
+const COOLDOWN_FILE = '/tmp/nervecord-poll.cooldown';
+const COOLDOWN_MS = 120000; // 2 min cooldown after failure
 
 function isLocked() {
   try {
     const stat = fs.statSync(LOCK_FILE);
     const ageMs = Date.now() - stat.mtimeMs;
-    // Stale lock (>2 min) — remove it
     if (ageMs > 120000) { fs.unlinkSync(LOCK_FILE); return false; }
+    return true;
+  } catch { return false; }
+}
+
+function isInCooldown() {
+  try {
+    const stat = fs.statSync(COOLDOWN_FILE);
+    const ageMs = Date.now() - stat.mtimeMs;
+    if (ageMs > COOLDOWN_MS) { fs.unlinkSync(COOLDOWN_FILE); return false; }
     return true;
   } catch { return false; }
 }
@@ -101,7 +112,11 @@ async function main() {
 
   // Don't overlap — if an agent is already running, skip this cycle
   if (isLocked()) {
-    console.log(`[${new Date().toISOString()}] Agent already running, skipping...`);
+    return;
+  }
+
+  // Don't hammer API after failures — respect cooldown
+  if (isInCooldown()) {
     return;
   }
 
@@ -119,7 +134,9 @@ async function main() {
     );
     console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
   } catch (e) {
-    console.error(`[${new Date().toISOString()}] Agent failed: ${e.message}`);
+    console.error(`[${new Date().toISOString()}] Agent failed: ${e.message.substring(0, 200)}`);
+    // Set cooldown so we don't hammer the API
+    try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
   } finally {
     // Always remove lock
     try { fs.unlinkSync(LOCK_FILE); } catch {}
