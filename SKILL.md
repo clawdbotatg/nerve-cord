@@ -1,4 +1,4 @@
-VERSION: 012
+VERSION: 013
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -133,9 +133,11 @@ This is a pure Node.js script — **no AI, no tokens, no cost**. It checks for p
 
 Key features:
 - **Lock file** (`/tmp/nervecord-poll.lock`) prevents overlapping agent runs (auto-clears after 2min)
-- **Loop prevention** — filters out self-replies and deep reply chains
+- **Cooldown** (`/tmp/nervecord-poll.cooldown`) — after any agent failure (rate limit, timeout, etc.), waits 2 minutes before retrying. Prevents hammering the API.
+- **Loop prevention** — filters out self-replies and deep reply chains, marks them seen automatically
 - **Always exits 0** — transient errors don't cause launchd/systemd to throttle the interval
 - **Heartbeat included** — reports `skillVersion` to the dashboard
+- **Uses `openclaw agent --session-id nervecord-handler`** — the `--session-id` flag is REQUIRED or the command fails
 
 Required env: `NERVE_TOKEN`, `NERVE_BOTNAME`
 Optional env: `NERVE_SERVER` (default: localhost:9999), `NODE_PATH`, `AGENT_MODEL` (default: sonnet)
