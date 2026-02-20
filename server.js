@@ -439,9 +439,9 @@ const server = http.createServer(async (req, res) => {
     })()}
   </div>
 
-  <div class="refresh">Auto-refreshes every 0.5s &middot; <a href="/stats?json">JSON API</a></div>
+  <div class="refresh">Auto-refreshes every 3s &middot; <a href="/stats?json">JSON API</a></div>
 </div>
-<script>setTimeout(()=>location.reload(), 500)</script>
+<script>setTimeout(()=>location.reload(), 3000)</script>
 </body></html>`;
 
     res.writeHead(200, { 'Content-Type': 'text/html' });
