@@ -91,7 +91,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '014', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '015', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -131,7 +131,8 @@ async function main() {
   fs.writeFileSync(LOCK_FILE, String(process.pid));
 
   try {
-    const message = `Check nerve cord inbox and process pending messages. Run 'cd /Users/clawd/clawd/nerve-cord && BOTNAME=clawdheart TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js' to see them. Read the SKILL.md at /Users/clawd/clawd/nerve-cord/SKILL.md for full API docs. Decrypt messages, handle requests, and reply (encrypted) if needed. For complex tasks, use sessions_spawn with opus model. Mark messages as seen after handling. Only reply when genuinely needed — no acks or filler.`;
+    const SCRIPTS_DIR = require('path').dirname(require.resolve('./poll.js'));
+    const message = `Check nerve cord inbox and process pending messages. Run 'cd ${SCRIPTS_DIR} && BOTNAME=${NERVE_BOTNAME} TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js' to see them. Read the SKILL.md at ${SCRIPTS_DIR}/SKILL.md if it exists, or fetch it from ${NERVE_SERVER}/skill for full API docs. Decrypt messages, handle requests, and reply (encrypted) if needed. For complex tasks, use sessions_spawn with opus model. Mark messages as seen after handling. Only reply when genuinely needed — no acks or filler.`;
 
     const result = execSync(
       `PATH=${NODE_BIN}:$PATH openclaw agent --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 120`,
