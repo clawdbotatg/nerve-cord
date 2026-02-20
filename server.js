@@ -28,6 +28,7 @@ const BOTS_FILE = path.join(DATA_DIR, 'bots.json');
 const LOG_DIR = path.join(DATA_DIR, 'log');
 const PRIO_FILE = path.join(DATA_DIR, 'priorities.json');
 const SUGGESTIONS_FILE = path.join(DATA_DIR, 'suggestions.json');
+const PROJECTS_FILE = path.join(DATA_DIR, 'projects.json');
 const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24h
 const LARVA_EXPIRY_MS = 60 * 60 * 1000; // 1h — larvae expire after no heartbeat
 const SAVE_INTERVAL = 30_000; // 30s
@@ -40,6 +41,7 @@ let heartbeats = new Map(); // name -> { lastSeen, ip, version }
 let priorities = []; // ordered array of { text, setBy, setAt }
 let suggestions = []; // community suggestions: { id, title, body, from, created }
 let larvae = new Map(); // name -> { name, task, status, registered, lastSeen, ip }
+let projects = []; // { id, name, status, repo, url, contract, chain, description, metadata, nextSteps, createdBy, created, updated }
 
 // --- Activity Log (daily files) ---
 function logDateKey(isoStr) { return isoStr.slice(0, 10); } // YYYY-MM-DD
@@ -120,6 +122,10 @@ function load() {
       suggestions = JSON.parse(fs.readFileSync(SUGGESTIONS_FILE, 'utf8'));
       console.log(`Loaded ${suggestions.length} suggestions from disk`);
     }
+    if (fs.existsSync(PROJECTS_FILE)) {
+      projects = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8'));
+      console.log(`Loaded ${projects.length} projects from disk`);
+    }
   } catch (e) { console.error('Load error:', e.message); }
 }
 
@@ -130,6 +136,7 @@ function save() {
     fs.writeFileSync(BOTS_FILE, JSON.stringify([...bots.values()], null, 2));
     fs.writeFileSync(PRIO_FILE, JSON.stringify(priorities, null, 2));
     fs.writeFileSync(SUGGESTIONS_FILE, JSON.stringify(suggestions, null, 2));
+    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
   } catch (e) { console.error('Save error:', e.message); }
 }
 
@@ -355,6 +362,24 @@ const server = http.createServer(async (req, res) => {
   </div>
 
   <div class="section">
+    <h2>📦 Projects</h2>
+    ${(() => {
+      if (!projects.length) return '<div style="color:#666;padding:4px 0">No projects tracked</div>';
+      const statusOrder = ['idea','research','building','beta','live','paused','archived'];
+      const statusColors = { idea:'#9b59b6', research:'#3498db', building:'#e67e22', beta:'#f1c40f', live:'#2ecc71', paused:'#95a5a6', archived:'#666' };
+      const sorted = [...projects].sort((a,b) => statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status));
+      const rows = sorted.map(p => {
+        const color = statusColors[p.status] || '#8b949e';
+        const badge = '<span style="background:' + color + ';color:#fff;padding:2px 8px;border-radius:10px;font-size:11px">' + p.status + '</span>';
+        const next = p.nextSteps && p.nextSteps.length ? p.nextSteps[0] : '—';
+        const links = [p.repo ? '<a href="https://' + p.repo + '" style="color:#58a6ff;text-decoration:none">repo</a>' : '', p.url ? '<a href="' + p.url + '" style="color:#58a6ff;text-decoration:none">live</a>' : ''].filter(Boolean).join(' · ');
+        return '<tr><td style="font-weight:bold">' + p.name + '</td><td>' + badge + '</td><td style="color:#8b949e;font-size:13px">' + next + '</td><td>' + (links || '—') + '</td></tr>';
+      }).join('');
+      return '<table><tr><th>Project</th><th>Status</th><th>Next Step</th><th>Links</th></tr>' + rows + '</table>';
+    })()}
+  </div>
+
+  <div class="section">
     <h2>🐛 Larvae</h2>
     ${(() => {
       const now = Date.now();
@@ -514,8 +539,9 @@ const server = http.createServer(async (req, res) => {
     const isHeartbeat = req.method === 'POST' && p === '/heartbeat';
     const isLarvaRegister = req.method === 'POST' && p === '/larvae';
     const isLarvaUpdate = req.method === 'PATCH' && /^\/larvae\/[a-zA-Z0-9_-]+$/.test(p);
+    const isProjectUpdate = req.method === 'PATCH' && /^\/projects\/proj_[A-Za-z0-9_-]+$/.test(p);
     const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
-    if (!isGet && !isSuggestion && !isLog && !isHeartbeat && !isLarvaRegister && !isLarvaUpdate && !isSeen) {
+    if (!isGet && !isSuggestion && !isLog && !isHeartbeat && !isLarvaRegister && !isLarvaUpdate && !isProjectUpdate && !isSeen) {
       return json(res, 403, { error: 'larva token — limited write access' });
     }
   }
@@ -900,6 +926,84 @@ const server = http.createServer(async (req, res) => {
     if (!larvae.has(larvaGetMatch[1])) return json(res, 404, { error: 'larva not found' });
     larvae.delete(larvaGetMatch[1]);
     return json(res, 200, { deleted: larvaGetMatch[1] });
+  }
+
+  // --- Projects ---
+
+  // GET /projects — list all projects (optionally ?status=building)
+  if (req.method === 'GET' && p === '/projects') {
+    let result = [...projects];
+    const status = url.searchParams.get('status');
+    if (status) result = result.filter(p => p.status === status);
+    return json(res, 200, result);
+  }
+
+  // POST /projects — create a project (full token only)
+  if (req.method === 'POST' && p === '/projects') {
+    try {
+      const body = await readBody(req);
+      if (!body.name) return json(res, 400, { error: 'name required' });
+      const now = new Date().toISOString();
+      const project = {
+        id: `proj_${nanoid(12)}`,
+        name: body.name,
+        status: body.status || 'idea',
+        repo: body.repo || null,
+        url: body.url || null,
+        contract: body.contract || null,
+        chain: body.chain || null,
+        description: body.description || '',
+        metadata: body.metadata || {},
+        nextSteps: body.nextSteps || [],
+        createdBy: body.from || 'unknown',
+        created: now,
+        updated: now,
+      };
+      projects.push(project);
+      save();
+      return json(res, 201, project);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // Project routes by ID
+  const projMatch = p.match(/^\/projects\/(proj_[A-Za-z0-9_-]+)$/);
+
+  // GET /projects/:id
+  if (req.method === 'GET' && projMatch) {
+    const proj = projects.find(p => p.id === projMatch[1]);
+    if (!proj) return json(res, 404, { error: 'project not found' });
+    return json(res, 200, proj);
+  }
+
+  // PATCH /projects/:id — update project (larva + full token)
+  if (req.method === 'PATCH' && projMatch) {
+    const idx = projects.findIndex(p => p.id === projMatch[1]);
+    if (idx === -1) return json(res, 404, { error: 'project not found' });
+    try {
+      const body = await readBody(req);
+      const proj = projects[idx];
+      if (body.name !== undefined) proj.name = body.name;
+      if (body.status !== undefined) proj.status = body.status;
+      if (body.repo !== undefined) proj.repo = body.repo;
+      if (body.url !== undefined) proj.url = body.url;
+      if (body.contract !== undefined) proj.contract = body.contract;
+      if (body.chain !== undefined) proj.chain = body.chain;
+      if (body.description !== undefined) proj.description = body.description;
+      if (body.metadata !== undefined) proj.metadata = { ...proj.metadata, ...body.metadata };
+      if (body.nextSteps !== undefined) proj.nextSteps = body.nextSteps;
+      proj.updated = new Date().toISOString();
+      save();
+      return json(res, 200, proj);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // DELETE /projects/:id — remove project (full token only)
+  if (req.method === 'DELETE' && projMatch) {
+    const idx = projects.findIndex(p => p.id === projMatch[1]);
+    if (idx === -1) return json(res, 404, { error: 'project not found' });
+    const removed = projects.splice(idx, 1)[0];
+    save();
+    return json(res, 200, { deleted: removed });
   }
 
   // --- Community Suggestions ---
