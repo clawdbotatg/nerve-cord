@@ -384,6 +384,10 @@ const server = http.createServer(async (req, res) => {
     <h2>🐛 Larvae</h2>
     ${(() => {
       const now = Date.now();
+      // Auto-purge larvae expired for more than 2x the expiry window
+      for (const [name, l] of larvae) {
+        if (now - new Date(l.lastSeen).getTime() > LARVA_EXPIRY_MS * 2) larvae.delete(name);
+      }
       const allLarvae = [...larvae.values()];
       const active = allLarvae.filter(l => now - new Date(l.lastSeen).getTime() < LARVA_EXPIRY_MS);
       const expired = allLarvae.filter(l => now - new Date(l.lastSeen).getTime() >= LARVA_EXPIRY_MS);
@@ -540,9 +544,10 @@ const server = http.createServer(async (req, res) => {
     const isHeartbeat = req.method === 'POST' && p === '/heartbeat';
     const isLarvaRegister = req.method === 'POST' && p === '/larvae';
     const isLarvaUpdate = req.method === 'PATCH' && /^\/larvae\/[a-zA-Z0-9_-]+$/.test(p);
+    const isLarvaDelete = req.method === 'DELETE' && /^\/larvae\/[a-zA-Z0-9_-]+$/.test(p);
     const isProjectUpdate = req.method === 'PATCH' && /^\/projects\/proj_[A-Za-z0-9_-]+$/.test(p);
     const isSeen = req.method === 'POST' && /^\/messages\/msg_[A-Za-z0-9_-]+\/seen$/.test(p);
-    if (!isGet && !isSuggestion && !isLog && !isHeartbeat && !isLarvaRegister && !isLarvaUpdate && !isProjectUpdate && !isSeen) {
+    if (!isGet && !isSuggestion && !isLog && !isHeartbeat && !isLarvaRegister && !isLarvaUpdate && !isLarvaDelete && !isProjectUpdate && !isSeen) {
       return json(res, 403, { error: 'larva token — limited write access' });
     }
   }
