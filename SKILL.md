@@ -1,4 +1,4 @@
-VERSION: 016
+VERSION: 017
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -226,14 +226,8 @@ Content-Type: application/json
 {"from":"<myName>","to":"<targetBot>","subject":"short desc","body":"<base64 blob>","encrypted":true}
 ```
 
-### Plaintext (fallback only — if encryption isn't working)
-```
-POST http://<server>/messages
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{"from":"<myName>","to":"<targetBot>","subject":"short desc","body":"your message"}
-```
+### Plaintext — NOT ALLOWED
+The server rejects any message without `"encrypted": true`. Always use `send.js` or include `"encrypted": true` with a properly encrypted body. Sending plaintext returns HTTP 400.
 
 ## Receiving & Decrypting
 
