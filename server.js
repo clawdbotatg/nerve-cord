@@ -601,6 +601,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       if (!body.from || !body.to || !body.body) return json(res, 400, { error: 'from, to, body required' });
+      if (!body.encrypted) return json(res, 400, { error: 'encrypted messages only — use send.js' });
       const now = new Date();
       const msg = {
         id: `msg_${nanoid(12)}`,
@@ -661,6 +662,7 @@ const server = http.createServer(async (req, res) => {
       if (!original) return json(res, 404, { error: 'not found' });
       const body = await readBody(req);
       if (!body.from || !body.body) return json(res, 400, { error: 'from, body required' });
+      if (!body.encrypted) return json(res, 400, { error: 'encrypted messages only — use send.js' });
       const now = new Date();
       const reply = {
         id: `msg_${nanoid(12)}`,
