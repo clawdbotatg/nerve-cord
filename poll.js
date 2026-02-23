@@ -144,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 023, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 024, openclaw: ${ver}`);
     return true;
   }
 
@@ -189,6 +189,14 @@ function isNetworkError(e) {
   return NETWORK_ERRORS.some(code => e.message.includes(code) || e.code === code);
 }
 
+// Session lock errors — expected when the human is actively chatting.
+// The agent is already in use; just skip this cycle, don't penalize failcount.
+const SESSION_LOCK_PATTERNS = ['lock', 'session.*already', 'already.*running', 'ELOCK', 'session.*use', 'in use'];
+function isSessionLockError(e) {
+  const msg = (e.message || '').toLowerCase();
+  return SESSION_LOCK_PATTERNS.some(p => new RegExp(p, 'i').test(msg));
+}
+
 async function main() {
   // Check server reachability first — if off-network, silently exit (no failcount, no noise)
   if (!await isServerReachable()) return;
@@ -199,7 +207,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '023', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '024', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -302,15 +310,21 @@ RULES (no exceptions):
     console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
     resetFailCount();
   } catch (e) {
-    const fails = getFailCount() + 1;
-    setFailCount(fails);
-    const nextCooldown = Math.min(COOLDOWN_MS_BASE * Math.pow(2, fails), COOLDOWN_MS_MAX);
-    console.error(`[${new Date().toISOString()}] Agent failed (attempt ${fails}, cooldown ${Math.round(nextCooldown/1000)}s): ${e.message.substring(0, 200)}`);
-    try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
-    // ====== FALLBACK REPLY ======
-    // Agent failed — send a fallback reply to every sender so they know and can retry.
-    for (const m of aiMessages) {
-      sendReply(m.from, m.subject, `${NERVE_BOTNAME}: received your message but hit an error processing it. Please resend.`);
+    if (isSessionLockError(e)) {
+      // Human is actively using the agent — expected, not a real failure.
+      // Messages are already marked seen; they'll be handled next cycle when lock clears.
+      console.log(`[${new Date().toISOString()}] Session lock detected (human active?), skipping cycle — no failcount increment`);
+    } else {
+      const fails = getFailCount() + 1;
+      setFailCount(fails);
+      const nextCooldown = Math.min(COOLDOWN_MS_BASE * Math.pow(2, fails), COOLDOWN_MS_MAX);
+      console.error(`[${new Date().toISOString()}] Agent failed (attempt ${fails}, cooldown ${Math.round(nextCooldown/1000)}s): ${e.message.substring(0, 200)}`);
+      try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
+      // ====== FALLBACK REPLY ======
+      // Agent failed — send a fallback reply to every sender so they know and can retry.
+      for (const m of aiMessages) {
+        sendReply(m.from, m.subject, `${NERVE_BOTNAME}: received your message but hit an error processing it. Please resend.`);
+      }
     }
   } finally {
     try { fs.unlinkSync(LOCK_FILE); } catch {}
@@ -318,10 +332,8 @@ RULES (no exceptions):
 }
 
 main().catch(e => {
-  if (isNetworkError(e)) {
-    // Off-network — don't penalize, just exit silently
-    return;
-  }
+  if (isNetworkError(e)) return; // Off-network — silent exit
+  if (isSessionLockError(e)) return; // Human active — silent skip
   console.error(`[${new Date().toISOString()}] Poll error (will retry): ${e.message}`);
   try { fs.unlinkSync(LOCK_FILE); } catch {}
   setFailCount(getFailCount() + 1);

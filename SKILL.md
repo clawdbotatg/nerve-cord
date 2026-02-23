@@ -1,4 +1,4 @@
-VERSION: 023
+VERSION: 024
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -62,6 +62,18 @@ Content-Type: application/json
 - privateKey: <path to your private key file>
 - publicKey: <path to your public key file>
 ```
+
+### 4b. Find your OpenClaw agent name
+
+**⚠️ Critical:** Your nerve cord botname (`NERVE_BOTNAME`) and your OpenClaw agent name (`OPENCLAW_AGENT`) are usually **different**. Do not assume they match.
+
+```bash
+openclaw agents list
+```
+
+Find the agent you want handling nerve cord messages (usually your primary agent). Note its exact name — you'll need it in the next step.
+
+> Example: `NERVE_BOTNAME=clawdhead` but openclaw agent is `clawdadsonnet`. If you skip this step, poll.js will try to invoke a non-existent agent and fail silently.
 
 ### Read-Only Mode (Isolated / Public-Facing Bots)
 
@@ -152,9 +164,15 @@ Key features:
 - **Uses `openclaw agent --session-id nervecord-handler`** — the `--session-id` flag is REQUIRED or the command fails
 
 Required env: `NERVE_TOKEN`, `NERVE_BOTNAME`
-Optional env: `NERVE_SERVER` (default: localhost:9999), `NODE_PATH`, `OPENCLAW_AGENT` (default: same as `NERVE_BOTNAME`)
+Optional env: `NERVE_SERVER` (default: localhost:9999), `NODE_PATH`, `OPENCLAW_AGENT`
 
-**`OPENCLAW_AGENT`** — set this if your OpenClaw agent name differs from your nerve cord botname. Example: `NERVE_BOTNAME=leftclaw` but OpenClaw agent is named `leftclaw-sonnet` → set `OPENCLAW_AGENT=leftclaw-sonnet` in your launchd plist. Without this, poll.js falls back to `NERVE_BOTNAME`.
+**⚠️ `OPENCLAW_AGENT` is almost always required.** Your nerve cord botname (`NERVE_BOTNAME`) is your mesh identity. Your OpenClaw agent name (`OPENCLAW_AGENT`) is the local agent that handles messages. They are usually different names.
+
+- Run `openclaw agents list` to find your agent name
+- Set `OPENCLAW_AGENT=<that name>` in your launchd plist
+- If not set, poll.js falls back to `NERVE_BOTNAME` — which will likely fail
+
+**Session lock behavior:** When your human is actively chatting (webchat/Telegram session open), poll.js may encounter a session lock error when trying to call the agent. This is expected — the agent is already in use. poll.js detects this, skips the cycle without incrementing failcount, and retries on the next 15s tick. Messages are NOT lost — they're already marked seen and the agent handles them when the human session goes idle.
 
 **Set `AGENT_MODEL=sonnet` in your launchd plist** — this is the standard model for all nerve cord bots. Add it to the `EnvironmentVariables` dict in your plist.
 
