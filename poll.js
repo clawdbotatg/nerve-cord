@@ -19,6 +19,8 @@
 const http = require('http');
 const https = require('https');
 const { execSync } = require('child_process');
+const path = require('path');
+const SCRIPTS_DIR = path.dirname(require.main.filename);
 
 const NERVE_SERVER = process.env.NERVE_SERVER || 'http://localhost:9999';
 const NERVE_TOKEN = process.env.NERVE_TOKEN;
@@ -106,6 +108,66 @@ function isInCooldown() {
   } catch { return false; }
 }
 
+// Send a reply via send.js (deterministic, no AI)
+function sendReply(from, subject, replyText) {
+  try {
+    execSync(
+      `TOKEN=${NERVE_TOKEN} BOTNAME=${NERVE_BOTNAME} SERVER=${NERVE_SERVER} node ${SCRIPTS_DIR}/send.js ${from} ${JSON.stringify('Re: ' + subject)} ${JSON.stringify(replyText)}`,
+      { encoding: 'utf8', timeout: 15000 }
+    );
+    console.log(`[builtin] replied to ${from}`);
+  } catch (e) {
+    console.error(`[builtin] reply failed: ${e.message.substring(0, 100)}`);
+  }
+}
+
+// Built-in command dispatcher — handles known commands WITHOUT calling the AI.
+// Returns true if handled, false if the AI should take over.
+function tryBuiltinCommand(msg) {
+  const b = (msg.body || '').trim().toLowerCase();
+
+  // ping / alive check
+  if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
+    let ver = 'unknown';
+    try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 020, openclaw: ${ver}`);
+    return true;
+  }
+
+  // machine / system stats
+  if (/\b(machine stats|system stats|stats|sysinfo|uptime|cpu|memory|disk)\b/.test(b)) {
+    let stats = '';
+    try {
+      stats = execSync('uname -a && echo "---" && uptime && echo "---" && df -h 2>/dev/null | head -6', { encoding: 'utf8', timeout: 5000 }).trim();
+    } catch (e) { stats = `stats error: ${e.message}`; }
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} stats:\n${stats}`);
+    return true;
+  }
+
+  // skill version / what version are you
+  if (/\b(version|skill version|what version)\b/.test(b)) {
+    let ver = 'unknown';
+    try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 020, openclaw ${ver}`);
+    return true;
+  }
+
+  // update poll.js / update skill
+  if (/\b(update poll\.?js|update skill|refresh skill|pull update)\b/.test(b)) {
+    try {
+      execSync(`curl -sf -o ${SCRIPTS_DIR}/poll.js ${NERVE_SERVER}/scripts/poll.js`, { encoding: 'utf8', timeout: 15000 });
+      sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: poll.js updated from server. Restarting poller now.`);
+      // Restart our own launchd poller (fire-and-forget)
+      try { execSync(`launchctl bootout gui/$(id -u)/com.nervecord.poll && sleep 1 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist`, { encoding: 'utf8', timeout: 10000, shell: '/bin/zsh' }); } catch {}
+    } catch (e) {
+      sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: update failed — ${e.message.substring(0, 100)}`);
+    }
+    return true;
+  }
+
+  return false; // Not a builtin — hand to AI
+}
+
 async function main() {
   // Get OpenClaw version (cached after first call)
   if (!main._oclawVersion) {
@@ -113,7 +175,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '019', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '020', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -152,7 +214,6 @@ async function main() {
   // ====== MARK ALL MESSAGES SEEN IMMEDIATELY ======
   // Do this BEFORE calling the agent so messages never get stuck in pending forever.
   // Even if the agent crashes, the message is already seen — no infinite re-delivery.
-  const SCRIPTS_DIR = require('path').dirname(require.resolve('./poll.js'));
   for (const m of actionable) {
     try {
       await post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` });
@@ -178,12 +239,25 @@ async function main() {
     return { id: m.id, from: m.from, subject: m.subject, body: plaintext };
   });
 
+  // ====== BUILTIN COMMAND DISPATCH ======
+  // Handle known commands directly — no AI, 100% deterministic.
+  const aiMessages = [];
+  for (const m of decryptedMessages) {
+    const handled = tryBuiltinCommand(m);
+    if (!handled) aiMessages.push(m);
+  }
+
+  if (!aiMessages.length) {
+    // Everything was handled by builtins — no AI needed this cycle
+    return;
+  }
+
   // ====== DIRECTIVE PROMPT — NO WIGGLE ROOM ======
-  const msgList = decryptedMessages.map((m, i) =>
+  const msgList = aiMessages.map((m, i) =>
     `--- Message ${i + 1} ---\nFrom: ${m.from}\nSubject: ${m.subject}\nBody: ${m.body}`
   ).join('\n\n');
 
-  const message = `NERVE CORD: ${actionable.length} message(s) received. Handle ALL of them now.
+  const message = `NERVE CORD: ${aiMessages.length} message(s) received. Handle ALL of them now.
 
 ${msgList}
 
@@ -193,11 +267,12 @@ RULES (no exceptions):
 - For EACH message: do what it says, then reply with the result.
 - Reply command: TOKEN=${NERVE_TOKEN} BOTNAME=${NERVE_BOTNAME} SERVER=${NERVE_SERVER} node ${SCRIPTS_DIR}/send.js <from> "Re: <subject>" "<your reply>"
 - There is NO ignore option. Every message gets a reply — even if it's one sentence.
-- For complex multi-step tasks: spawn opus, reply when done.
+- For complex multi-step tasks: spawn a subagent, reply when done.
 - Silence = failure. Close the loop. Always.`;
 
+  try {
     const result = execSync(
-      `PATH=${NODE_BIN}:$PATH openclaw agent --agent ${NERVE_BOTNAME} --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 180`,
+      `PATH=${NODE_BIN}:$PATH openclaw agent --agent ${NERVE_BOTNAME} --session-id nervecord-handler --model ${AGENT_MODEL} --message ${JSON.stringify(message)} --timeout 180`,
       { encoding: 'utf8', timeout: 190000 }
     );
     console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
@@ -207,10 +282,13 @@ RULES (no exceptions):
     setFailCount(fails);
     const nextCooldown = Math.min(COOLDOWN_MS_BASE * Math.pow(2, fails), COOLDOWN_MS_MAX);
     console.error(`[${new Date().toISOString()}] Agent failed (attempt ${fails}, cooldown ${Math.round(nextCooldown/1000)}s): ${e.message.substring(0, 200)}`);
-    // Set cooldown so we don't hammer the API
     try { fs.writeFileSync(COOLDOWN_FILE, String(Date.now())); } catch {}
+    // ====== FALLBACK REPLY ======
+    // Agent failed — send a fallback reply to every sender so they know and can retry.
+    for (const m of aiMessages) {
+      sendReply(m.from, m.subject, `${NERVE_BOTNAME}: received your message but hit an error processing it. Please resend.`);
+    }
   } finally {
-    // Always remove lock
     try { fs.unlinkSync(LOCK_FILE); } catch {}
   }
 }

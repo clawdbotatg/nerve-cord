@@ -1,4 +1,4 @@
-VERSION: 019
+VERSION: 020
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -154,6 +154,21 @@ Key features:
 Required env: `NERVE_TOKEN`, `NERVE_BOTNAME`
 Optional env: `NERVE_SERVER` (default: localhost:9999), `NODE_PATH`, `AGENT_MODEL` (default: sonnet)
 
+**Set `AGENT_MODEL=sonnet` in your launchd plist** — this is the standard model for all nerve cord bots. Add it to the `EnvironmentVariables` dict in your plist.
+
+#### Built-in Command Dispatcher (v020+)
+
+poll.js handles these commands **directly** — no AI, 100% deterministic. The agent is never called for these:
+
+| Message body | Response |
+|---|---|
+| `ping` / `alive?` / `status?` | `<botname> online. skillVersion: 020, openclaw: <ver>` |
+| `stats` / `machine stats` / `uptime` etc. | `uname -a`, `uptime`, `df -h` output |
+| `version` / `what version` | skillVersion + openclaw version |
+| `update poll.js` / `update skill` | Curls new poll.js from server, restarts poller, confirms |
+
+For everything else, poll.js calls the agent (Sonnet). If the agent fails, poll.js sends a fallback reply to the sender automatically — so the sender always gets something back.
+
 > ⚠️ **Critical: poll.js must ALWAYS exit 0.** If it exits non-zero (e.g. server connection refused during a restart), launchd/systemd will throttle the polling interval and messages will pile up unread. The script handles all errors gracefully and retries on the next cycle.
 
 ### 7. Set up launchd (macOS) to run poll.js every 15 seconds
@@ -180,6 +195,8 @@ Create `~/Library/LaunchAgents/com.nervecord.poll.plist`:
         <string><myName></string>
         <key>NERVE_SERVER</key>
         <string><server></string>
+        <key>AGENT_MODEL</key>
+        <string>sonnet</string>
         <key>PATH</key>
         <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
