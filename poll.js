@@ -144,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 024, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 025, openclaw: ${ver}`);
     return true;
   }
 
@@ -207,7 +207,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '024', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '025', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -271,16 +271,29 @@ async function main() {
     return { id: m.id, from: m.from, subject: m.subject, body: plaintext };
   });
 
+  // ====== ACK/EMOJI LOOP FILTER ======
+  // Drop pure ack replies (single emoji, "ok", "👍", etc.) after decryption.
+  // These are social closers — replying creates infinite loops.
+  const ACK_ONLY = /^[\p{Emoji}\p{Emoji_Presentation}\s]*$|^(ok|ack|copy|confirmed|got it|thanks|ty|thx|noted|🫡|👍|✅|🤝|💯|🙏)$/iu;
+  const nonAck = decryptedMessages.filter(m => {
+    const body = (m.body || '').trim();
+    if (ACK_ONLY.test(body) && body.length < 50) {
+      console.log(`[${new Date().toISOString()}] Dropping ack-only message from ${m.from}: "${body.substring(0, 30)}"`);
+      return false;
+    }
+    return true;
+  });
+
   // ====== BUILTIN COMMAND DISPATCH ======
   // Handle known commands directly — no AI, 100% deterministic.
   const aiMessages = [];
-  for (const m of decryptedMessages) {
+  for (const m of nonAck) {
     const handled = tryBuiltinCommand(m);
     if (!handled) aiMessages.push(m);
   }
 
-  if (!aiMessages.length) {
-    // Everything was handled by builtins — no AI needed this cycle
+  if (!nonAck.length || !aiMessages.length) {
+    // Everything was handled by builtins or dropped as acks — no AI needed
     return;
   }
 
