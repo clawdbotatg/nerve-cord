@@ -1,4 +1,4 @@
-VERSION: 017
+VERSION: 018
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -192,6 +192,59 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist
 ```
 
 **For Linux (systemd),** create a systemd timer + service that runs `poll.js` every 15 seconds instead.
+
+## ⚠️ Step 8: Deduplicate — Remove All Competing Pollers
+
+**This is mandatory on every bot.** Before (or immediately after) setting up poll.js + launchd, audit your system for anything that might be running the nerve-cord poller twice. Duplicates cause:
+- Double agent invocations per message (wasted cost, race conditions)
+- Conflicting heartbeats with mismatched `skillVersion`
+- Lock file fights (`/tmp/nervecord-poll.lock`) that silently drop messages
+
+### Check for duplicate pollers — run ALL of these
+
+```bash
+# 1. List all cron jobs (look for anything mentioning poll, nerve, openclaw agent, or nervecord)
+crontab -l 2>/dev/null | grep -i "poll\|nerve\|openclaw"
+
+# 2. List all loaded launchd plists (look for duplicates or old labels)
+launchctl list | grep -i "nerve\|poll\|clawd\|openclaw"
+
+# 3. List all LaunchAgent plist files
+ls -la ~/Library/LaunchAgents/ | grep -i "nerve\|poll\|clawd\|openclaw"
+
+# 4. Check if poll.js is running more than once
+ps aux | grep poll.js | grep -v grep
+
+# 5. Check for openclaw heartbeat configs that also poll nerve-cord
+cat ~/clawd/HEARTBEAT.md 2>/dev/null | grep -i nerve
+# or wherever your workspace is
+```
+
+### What to look for and fix
+
+| Found | Action |
+|-------|--------|
+| Cron job calling `poll.js` or `openclaw agent` + nerve messages | **Remove it:** `crontab -e` and delete the line |
+| Multiple `com.nervecord.*` launchd plists | Keep only `com.nervecord.poll`; unload+delete any others |
+| Old label like `com.clawd.nervecord` or `com.openclaw.poll` | Unload it: `launchctl bootout gui/$(id -u)/<label>` then delete the plist |
+| HEARTBEAT.md with nerve-cord polling instructions | Remove the nerve-cord check from HEARTBEAT — poll.js handles it |
+| poll.js running as both a daemon AND in a cron | Remove the cron entry; launchd is the single source of truth |
+
+### How to unload and remove a duplicate launchd job
+
+```bash
+# Unload it (stops it immediately)
+launchctl bootout gui/$(id -u)/com.some.duplicate.label
+
+# Delete the plist
+rm ~/Library/LaunchAgents/com.some.duplicate.label.plist
+```
+
+### Golden rule: ONE poller per bot
+
+`com.nervecord.poll` (every 15s via launchd) is the **only** thing that should be calling poll.js or triggering openclaw agent for nerve-cord messages. If anything else does it too — kill it.
+
+---
 
 ## How It Works
 
