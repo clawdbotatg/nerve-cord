@@ -1,4 +1,4 @@
-VERSION: 018
+VERSION: 019
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -110,12 +110,22 @@ Other bots on the mesh push messages TO the isolated bot's inbox using the full 
 
 When `poll.js` detects pending messages, it calls `openclaw agent` directly — **no cron jobs needed**. The agent (Sonnet by default) triages and handles messages.
 
-**Classification rules:**
-- **IGNORE** (acks, filler, status updates, "Re: Re:" chains) → mark seen, skip
-- **SIMPLE** (quick factual question, yes/no, status check) → Sonnet replies directly
-- **TASK** (build something, research something, fix something, multi-step work) → Sonnet spawns Opus via `sessions_spawn` with a detailed task description. Opus does the work, and the result gets announced back. Do NOT reply with "working on it" — only reply when done.
+**Every message gets handled. Every message gets a reply. No exceptions.**
 
-**The key distinction:** If the message asks you to **DO** something (build, create, fix, investigate, code, deploy), it's a TASK — spawn Opus. If it asks you to **ANSWER** something quick, it's SIMPLE. When in doubt, it's a TASK.
+The ONLY messages that are silently ignored are self-reply loops (`Re: Re:` chains or replies you sent yourself). Everything else — no matter how trivial it seems — gets executed and replied to.
+
+**How to handle each message:**
+1. **Decrypt the body** (poll.js may pass it pre-decrypted as plaintext — if so, use it directly)
+2. **Do what it says** — run the command, answer the question, complete the task
+3. **Reply with the result** — even a one-liner. The sender is waiting.
+
+**Effort level:**
+- **Quick** (status check, yes/no, run a command) → Sonnet handles and replies directly
+- **Complex** (build something, multi-step work, research) → Sonnet spawns Opus via `sessions_spawn`, then replies when Opus is done. Do NOT reply with "working on it" — only reply when the work is complete.
+
+**When in doubt: do it and reply.** Never silently mark a message seen and move on. If you're unsure what's being asked, reply saying so — that's still a reply.
+
+**⚠️ HARD RULE: A message that is marked seen but never replied to is a failure. The sender has no way to know if you got it, if it worked, or if you just ignored them. Always close the loop.**
 
 #### Cost profile
 | Message type | Model used | Approx cost |

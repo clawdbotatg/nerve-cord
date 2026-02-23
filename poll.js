@@ -113,7 +113,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '018', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '019', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -147,20 +147,54 @@ async function main() {
     return;
   }
 
-  console.log(`[${new Date().toISOString()}] ${actionable.length} message(s) pending, triggering agent...`);
+  console.log(`[${new Date().toISOString()}] ${actionable.length} message(s) pending, processing...`);
 
-  // Create lock
-  fs.writeFileSync(LOCK_FILE, String(process.pid));
+  // ====== MARK ALL MESSAGES SEEN IMMEDIATELY ======
+  // Do this BEFORE calling the agent so messages never get stuck in pending forever.
+  // Even if the agent crashes, the message is already seen — no infinite re-delivery.
+  const SCRIPTS_DIR = require('path').dirname(require.resolve('./poll.js'));
+  for (const m of actionable) {
+    try {
+      await post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` });
+    } catch (e) {
+      console.error(`Failed to mark ${m.id} seen: ${e.message}`);
+    }
+  }
 
-  try {
-    const SCRIPTS_DIR = require('path').dirname(require.resolve('./poll.js'));
-    const message = `Nerve cord: pending messages. Check: cd ${SCRIPTS_DIR} && BOTNAME=${NERVE_BOTNAME} TOKEN=${NERVE_TOKEN} SERVER=${NERVE_SERVER} node check.js
+  // ====== DECRYPT INLINE ======
+  // Decrypt each message now so the agent receives plaintext — no crypto ambiguity.
+  const decryptedMessages = actionable.map(m => {
+    let plaintext = m.body;
+    if (m.encrypted) {
+      try {
+        plaintext = execSync(
+          `node ${SCRIPTS_DIR}/crypto.js decrypt ${SCRIPTS_DIR}/keys/${NERVE_BOTNAME}.key ${JSON.stringify(m.body)}`,
+          { encoding: 'utf8', timeout: 10000 }
+        ).trim();
+      } catch (e) {
+        plaintext = `[DECRYPT FAILED: ${e.message.substring(0, 100)}] raw: ${m.body.substring(0, 100)}`;
+      }
+    }
+    return { id: m.id, from: m.from, subject: m.subject, body: plaintext };
+  });
 
-If encrypted, decrypt: node ${SCRIPTS_DIR}/crypto.js decrypt ${SCRIPTS_DIR}/keys/${NERVE_BOTNAME}.key "<body>"
-To reply: TOKEN=${NERVE_TOKEN} BOTNAME=${NERVE_BOTNAME} SERVER=${NERVE_SERVER} node ${SCRIPTS_DIR}/send.js <recipient> "Re: <subject>" "<reply>"
-Mark seen: curl -s -X POST ${NERVE_SERVER}/messages/<id>/seen -H 'Authorization: Bearer ${NERVE_TOKEN}'
+  // ====== DIRECTIVE PROMPT — NO WIGGLE ROOM ======
+  const msgList = decryptedMessages.map((m, i) =>
+    `--- Message ${i + 1} ---\nFrom: ${m.from}\nSubject: ${m.subject}\nBody: ${m.body}`
+  ).join('\n\n');
 
-Rules: Mark all messages seen after handling. Only reply if a reply was requested. For complex tasks, spawn opus. No acks or filler.`;
+  const message = `NERVE CORD: ${actionable.length} message(s) received. Handle ALL of them now.
+
+${msgList}
+
+---
+RULES (no exceptions):
+- All messages are already marked seen. Do NOT mark them seen again.
+- For EACH message: do what it says, then reply with the result.
+- Reply command: TOKEN=${NERVE_TOKEN} BOTNAME=${NERVE_BOTNAME} SERVER=${NERVE_SERVER} node ${SCRIPTS_DIR}/send.js <from> "Re: <subject>" "<your reply>"
+- There is NO ignore option. Every message gets a reply — even if it's one sentence.
+- For complex multi-step tasks: spawn opus, reply when done.
+- Silence = failure. Close the loop. Always.`;
 
     const result = execSync(
       `PATH=${NODE_BIN}:$PATH openclaw agent --agent ${NERVE_BOTNAME} --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 180`,
