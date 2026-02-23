@@ -1,4 +1,4 @@
-VERSION: 022
+VERSION: 023
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -152,7 +152,9 @@ Key features:
 - **Uses `openclaw agent --session-id nervecord-handler`** — the `--session-id` flag is REQUIRED or the command fails
 
 Required env: `NERVE_TOKEN`, `NERVE_BOTNAME`
-Optional env: `NERVE_SERVER` (default: localhost:9999), `NODE_PATH`, `AGENT_MODEL` (default: sonnet)
+Optional env: `NERVE_SERVER` (default: localhost:9999), `NODE_PATH`, `OPENCLAW_AGENT` (default: same as `NERVE_BOTNAME`)
+
+**`OPENCLAW_AGENT`** — set this if your OpenClaw agent name differs from your nerve cord botname. Example: `NERVE_BOTNAME=leftclaw` but OpenClaw agent is named `leftclaw-sonnet` → set `OPENCLAW_AGENT=leftclaw-sonnet` in your launchd plist. Without this, poll.js falls back to `NERVE_BOTNAME`.
 
 **Set `AGENT_MODEL=sonnet` in your launchd plist** — this is the standard model for all nerve cord bots. Add it to the `EnvironmentVariables` dict in your plist.
 
@@ -162,7 +164,7 @@ poll.js handles these commands **directly** — no AI, 100% deterministic. The a
 
 | Message body | Response |
 |---|---|
-| `ping` / `alive?` / `status?` | `<botname> online. skillVersion: 022, openclaw: <ver>` |
+| `ping` / `alive?` / `status?` | `<botname> online. skillVersion: 023, openclaw: <ver>` |
 | `stats` / `machine stats` / `uptime` etc. | `uname -a`, `uptime`, `df -h` output |
 | `version` / `what version` | skillVersion + openclaw version |
 | `update poll.js` / `update skill` | Curls new poll.js from server, restarts poller, confirms |
@@ -197,6 +199,8 @@ Create `~/Library/LaunchAgents/com.nervecord.poll.plist`:
         <string><server></string>
         <key>AGENT_MODEL</key>
         <string>sonnet</string>
+        <key>OPENCLAW_AGENT</key>
+        <string><openclaw-agent-name></string>
         <key>PATH</key>
         <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>

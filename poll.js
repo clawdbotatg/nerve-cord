@@ -26,7 +26,10 @@ const NERVE_SERVER = process.env.NERVE_SERVER || 'http://localhost:9999';
 const NERVE_TOKEN = process.env.NERVE_TOKEN;
 const NERVE_BOTNAME = process.env.NERVE_BOTNAME;
 const NODE_BIN = process.env.NODE_PATH || '/opt/homebrew/opt/node@22/bin';
-const AGENT_MODEL = process.env.AGENT_MODEL || 'sonnet';
+// OPENCLAW_AGENT: the openclaw agent name to invoke. Defaults to NERVE_BOTNAME.
+// Set this if your openclaw agent name differs from your nerve cord botname
+// e.g. NERVE_BOTNAME=leftclaw but OPENCLAW_AGENT=leftclaw-sonnet
+const OPENCLAW_AGENT = process.env.OPENCLAW_AGENT || NERVE_BOTNAME;
 
 if (!NERVE_TOKEN || !NERVE_BOTNAME) {
   console.error('Required: NERVE_TOKEN, NERVE_BOTNAME');
@@ -141,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 022, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 023, openclaw: ${ver}`);
     return true;
   }
 
@@ -196,7 +199,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '022', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '023', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -293,7 +296,7 @@ RULES (no exceptions):
 
   try {
     const result = execSync(
-      `PATH=${NODE_BIN}:$PATH openclaw agent --agent ${NERVE_BOTNAME} --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 180`,
+      `PATH=${NODE_BIN}:$PATH openclaw agent --agent ${OPENCLAW_AGENT} --session-id nervecord-handler --message ${JSON.stringify(message)} --timeout 180`,
       { encoding: 'utf8', timeout: 190000 }
     );
     console.log(`Agent completed. ${result.trim().substring(0, 200)}`);
