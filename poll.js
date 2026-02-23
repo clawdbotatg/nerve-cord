@@ -70,6 +70,17 @@ const COOLDOWN_MS_BASE = 120000; // 2 min base cooldown after failure
 const COOLDOWN_MS_MAX = 900000; // 15 min max cooldown
 const FAIL_COUNT_FILE = '/tmp/nervecord-poll.failcount';
 
+// Check if the nerve-cord server is reachable before doing anything.
+// If we're off the home network, silently exit — no failcount, no log noise.
+async function isServerReachable() {
+  try {
+    await get(`${NERVE_SERVER}/health`, { Authorization: `Bearer ${NERVE_TOKEN}` });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function isLocked() {
   try {
     const stat = fs.statSync(LOCK_FILE);
@@ -130,7 +141,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 020, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 021, openclaw: ${ver}`);
     return true;
   }
 
@@ -148,7 +159,7 @@ function tryBuiltinCommand(msg) {
   if (/\b(version|skill version|what version)\b/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 020, openclaw ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 021, openclaw ${ver}`);
     return true;
   }
 
@@ -168,14 +179,24 @@ function tryBuiltinCommand(msg) {
   return false; // Not a builtin — hand to AI
 }
 
+// Network errors — should NOT increment failcount or trigger cooldown.
+// These happen when the bot is off the home network, not because the AI failed.
+const NETWORK_ERRORS = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EHOSTUNREACH', 'ECONNRESET', 'ENETUNREACH'];
+function isNetworkError(e) {
+  return NETWORK_ERRORS.some(code => e.message.includes(code) || e.code === code);
+}
+
 async function main() {
+  // Check server reachability first — if off-network, silently exit (no failcount, no noise)
+  if (!await isServerReachable()) return;
+
   // Get OpenClaw version (cached after first call)
   if (!main._oclawVersion) {
     try { main._oclawVersion = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch { main._oclawVersion = 'unknown'; }
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '020', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '021', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -294,6 +315,10 @@ RULES (no exceptions):
 }
 
 main().catch(e => {
+  if (isNetworkError(e)) {
+    // Off-network — don't penalize, just exit silently
+    return;
+  }
   console.error(`[${new Date().toISOString()}] Poll error (will retry): ${e.message}`);
   try { fs.unlinkSync(LOCK_FILE); } catch {}
   setFailCount(getFailCount() + 1);
