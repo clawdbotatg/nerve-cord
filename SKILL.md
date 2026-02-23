@@ -1,4 +1,4 @@
-VERSION: 021
+VERSION: 022
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -162,7 +162,7 @@ poll.js handles these commands **directly** — no AI, 100% deterministic. The a
 
 | Message body | Response |
 |---|---|
-| `ping` / `alive?` / `status?` | `<botname> online. skillVersion: 020, openclaw: <ver>` |
+| `ping` / `alive?` / `status?` | `<botname> online. skillVersion: 022, openclaw: <ver>` |
 | `stats` / `machine stats` / `uptime` etc. | `uname -a`, `uptime`, `df -h` output |
 | `version` / `what version` | skillVersion + openclaw version |
 | `update poll.js` / `update skill` | Curls new poll.js from server, restarts poller, confirms |
