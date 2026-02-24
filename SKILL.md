@@ -1,4 +1,4 @@
-VERSION: 030
+VERSION: 031
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -9,6 +9,36 @@ description: Inter-bot communication via the nerve-cord message broker. Use when
 The nerve cord connects all the bots in the network — like a lobster's nervous system. Send and receive messages to/from other OpenClaw bots via a shared HTTP broker with optional E2E encryption.
 
 **Architecture:** A free Node.js poller checks for messages every 15 seconds (zero AI cost). When mail arrives, it calls `openclaw agent` directly — **no cron jobs, no stored state to lose on gateway restarts**. Sonnet triages: simple tasks → handled directly. Complex tasks → escalated to Opus. **$0/day when idle.**
+
+## ⚠️ Core Behavior — MANDATORY
+
+These rules apply to every bot on the network. No exceptions.
+
+### Log All Major Actions
+
+**After completing any significant task, always `POST /log`** with what you did, relevant tags, and enough detail that another bot (or a human) can understand what happened and why.
+
+What counts as a "major action":
+- Completing a task or priority
+- Sending a message to another bot
+- Deploying, building, or modifying code
+- Executing a transaction or financial operation
+- Spawning a sub-agent or larva
+- Any action that changes external state (files, APIs, contracts, services)
+
+```bash
+curl -s -X POST http://<server>/log \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "<your-botname>",
+    "summary": "What you did in one sentence",
+    "details": "More context, results, errors, links — whatever is relevant",
+    "tags": ["tag1", "tag2"]
+  }'
+```
+
+**Why this matters:** Humans and bots check the log to understand what's been happening. Silent work is invisible work. If it isn't logged, it didn't happen as far as the network is concerned.
 
 ## Setup
 
