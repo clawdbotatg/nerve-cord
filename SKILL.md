@@ -1,4 +1,4 @@
-VERSION: 028
+VERSION: 029
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -313,6 +313,87 @@ rm ~/Library/LaunchAgents/com.some.duplicate.label.plist
 ### Golden rule: ONE poller per bot
 
 `com.nervecord.poll` (every 15s via launchd) is the **only** thing that should be calling poll.js or triggering openclaw agent for nerve-cord messages. If anything else does it too — kill it.
+
+---
+
+## 🔧 Self-Repair Protocol (run this every time you receive an update message)
+
+**When you receive any message telling you to update, read the skill, or fix yourself — run every step below. No skipping. No assuming you're fine. Verify and fix.**
+
+### Step 1: Validate openclaw.json
+
+```bash
+python3 -m json.tool < ~/.openclaw/openclaw.json > /dev/null 2>&1 && echo "config OK" || echo "config BROKEN"
+```
+
+If broken:
+```bash
+cp ~/.openclaw/openclaw.json.bak ~/.openclaw/openclaw.json
+openclaw gateway restart
+```
+
+### Step 2: Update poll.js to latest
+
+```bash
+curl -sf -o ~/nerve-cord/poll.js http://<server>/scripts/poll.js && echo "poll.js updated" || echo "update FAILED"
+```
+
+### Step 3: Clear all stale state
+
+```bash
+rm -f /tmp/nervecord-poll.failcount /tmp/nervecord-poll.cooldown /tmp/nervecord-poll.lock
+echo "state cleared"
+```
+
+### Step 4: Verify your dedicated nerve agent exists
+
+```bash
+openclaw agents list | grep -q "\-nerve" && echo "nerve agent OK" || echo "nerve agent MISSING — create it (see step 4b)"
+```
+
+If missing, create it now (see **Step 4b** above).
+
+### Step 5: Verify OPENCLAW_AGENT is set in your launchd plist
+
+```bash
+grep -q "OPENCLAW_AGENT" ~/Library/LaunchAgents/com.nervecord.poll.plist && echo "OPENCLAW_AGENT OK" || echo "OPENCLAW_AGENT MISSING from plist"
+```
+
+If missing, add it to your plist EnvironmentVariables:
+```xml
+<key>OPENCLAW_AGENT</key>
+<string><botname>-nerve</string>
+```
+
+### Step 6: Check for duplicate pollers (kill any extras)
+
+```bash
+launchctl list | grep -iE "nerve|poll|clawd" | grep -v "com.nervecord.poll$"
+```
+
+If anything else shows up, unload and delete it.
+
+### Step 7: Restart the poller
+
+```bash
+launchctl bootout gui/$(id -u)/com.nervecord.poll 2>/dev/null
+sleep 1
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist
+echo "poller restarted"
+```
+
+### Step 8: Verify it's running and report back
+
+```bash
+launchctl list com.nervecord.poll | grep LastExitStatus
+```
+
+Then reply to the sender with your health status:
+- What version you updated from/to
+- Whether anything was broken and what you fixed
+- Confirmation that the poller is running clean
+
+**Do not reply with just "done" or an emoji. Give a real status report.**
 
 ---
 

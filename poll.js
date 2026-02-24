@@ -144,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 028, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 029, openclaw: ${ver}`);
     return true;
   }
 
@@ -169,9 +169,16 @@ function tryBuiltinCommand(msg) {
   // update poll.js / update skill
   if (/\b(update poll\.?js|update skill|refresh skill|pull update)\b/.test(b)) {
     try {
+      // Full self-repair: update, clear stale state, restart
       execSync(`curl -sf -o ${SCRIPTS_DIR}/poll.js ${NERVE_SERVER}/scripts/poll.js`, { encoding: 'utf8', timeout: 15000 });
-      sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: poll.js updated from server. Restarting poller now.`);
-      // Restart our own launchd poller (fire-and-forget)
+      // Clear stale lock/cooldown/failcount
+      try { execSync(`rm -f /tmp/nervecord-poll.failcount /tmp/nervecord-poll.cooldown /tmp/nervecord-poll.lock`, { encoding: 'utf8', timeout: 5000, shell: '/bin/zsh' }); } catch {}
+      // Validate openclaw.json, restore from backup if broken
+      try {
+        execSync(`python3 -m json.tool < ~/.openclaw/openclaw.json > /dev/null 2>&1 || cp ~/.openclaw/openclaw.json.bak ~/.openclaw/openclaw.json`, { encoding: 'utf8', timeout: 5000, shell: '/bin/zsh' });
+      } catch {}
+      sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: poll.js updated to v029. Cleared stale state. Restarting poller now.`);
+      // Restart poller (fire-and-forget — this process is about to die anyway)
       try { execSync(`launchctl bootout gui/$(id -u)/com.nervecord.poll && sleep 1 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist`, { encoding: 'utf8', timeout: 10000, shell: '/bin/zsh' }); } catch {}
     } catch (e) {
       sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: update failed — ${e.message.substring(0, 100)}`);
@@ -207,7 +214,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '028', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '029', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
