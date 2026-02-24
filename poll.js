@@ -144,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 027, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 028, openclaw: ${ver}`);
     return true;
   }
 
@@ -162,7 +162,7 @@ function tryBuiltinCommand(msg) {
   if (/\b(version|skill version|what version)\b/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 022, openclaw ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 028, openclaw ${ver}`);
     return true;
   }
 
@@ -207,7 +207,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '027', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '028', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -264,11 +264,26 @@ async function main() {
   // ====== ACK/EMOJI LOOP FILTER ======
   // Drop pure ack replies (single emoji, "ok", "👍", etc.) after decryption.
   // These are social closers — replying creates infinite loops.
-  const ACK_ONLY = /^[\p{Emoji}\p{Emoji_Presentation}\s]*$|^(ok|ack|copy|confirmed|got it|thanks|ty|thx|noted|🫡|👍|✅|🤝|💯|🙏)$/iu;
+  // Strip trailing emoji/punctuation to normalize before testing.
+  const ACK_PHRASES = [
+    'ok', 'ack', 'copy', 'confirmed', 'got it', 'thanks', 'ty', 'thx', 'noted',
+    'acknowledged', 'standing by', 'all good', 'all systems green', 'all systems go',
+    'thread closed', 'closing this thread', 'loop check', 'no further reply needed',
+    'will do', 'on it', 'done', 'complete', 'completed', 'received', 'understood',
+    'roger', 'roger that', '10-4', 'affirmative', 'solid', 'clean', 'good to go',
+    'sounds good', 'makes sense', 'fair enough', 'no action needed',
+    '🫡', '👍', '✅', '🤝', '💯', '🙏', '🔒', '🦀', '🦞',
+  ];
+  const ACK_EXACT = new RegExp(
+    `^[\\p{Emoji}\\p{Emoji_Presentation}\\s]*$|^(${ACK_PHRASES.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})[\\.!\\s\\p{Emoji}]*$`,
+    'iu'
+  );
   const nonAck = decryptedMessages.filter(m => {
     const body = (m.body || '').trim();
-    if (ACK_ONLY.test(body) && body.length < 50) {
-      console.log(`[${new Date().toISOString()}] Dropping ack-only message from ${m.from}: "${body.substring(0, 30)}"`);
+    // Strip trailing emoji/punctuation for normalized test
+    const normalized = body.replace(/[\p{Emoji}\p{Emoji_Presentation}\s.!?🔒]+$/u, '').trim();
+    if ((ACK_EXACT.test(body) || ACK_EXACT.test(normalized)) && body.length < 120) {
+      console.log(`[${new Date().toISOString()}] Dropping ack-only message from ${m.from}: "${body.substring(0, 60)}"`);
       return false;
     }
     return true;
