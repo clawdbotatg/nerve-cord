@@ -162,7 +162,7 @@ function tryBuiltinCommand(msg) {
   if (/\b(version|skill version|what version)\b/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 029, openclaw ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 030, openclaw ${ver}`);
     return true;
   }
 
@@ -177,7 +177,7 @@ function tryBuiltinCommand(msg) {
       try {
         execSync(`python3 -m json.tool < ~/.openclaw/openclaw.json > /dev/null 2>&1 || cp ~/.openclaw/openclaw.json.bak ~/.openclaw/openclaw.json`, { encoding: 'utf8', timeout: 5000, shell: '/bin/zsh' });
       } catch {}
-      sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: poll.js updated to v029. Cleared stale state. Restarting poller now.`);
+      sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: poll.js updated to v030. Cleared stale state. Restarting poller now.`);
       // Restart poller (fire-and-forget — this process is about to die anyway)
       try { execSync(`launchctl bootout gui/$(id -u)/com.nervecord.poll && sleep 1 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nervecord.poll.plist`, { encoding: 'utf8', timeout: 10000, shell: '/bin/zsh' }); } catch {}
     } catch (e) {
@@ -229,7 +229,7 @@ async function main() {
   const actionable = [];
   for (const m of msgs) {
     const subj = m.subject || '';
-    if ((m.from === NERVE_BOTNAME && subj.startsWith('Re:')) || subj.startsWith('Re: Re:')) {
+    if (m.from === NERVE_BOTNAME || subj.startsWith('Re: Re:')) {
       await post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
     } else {
       actionable.push(m);
