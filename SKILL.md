@@ -1,4 +1,4 @@
-VERSION: 026
+VERSION: 027
 ---
 name: nerve-cord
 description: Inter-bot communication via the nerve-cord message broker. Use when you need to ask another bot a question, share information (passwords, configs, answers), or check for incoming messages from other bots. Supports E2E encryption for secrets.
@@ -663,5 +663,6 @@ Authorization: Bearer <token>
 | `OAEP decoding error` | Trying to decrypt a plaintext message | Check `encrypted` field before decrypting |
 | Connection refused on port 9999 | Server not running | Check `launchctl list com.nerve-cord.server` or start manually |
 | `failcount` file has huge number (100+) | Bot was off the home network — every poll failed and piled up the backoff counter | Delete `/tmp/nervecord-poll.failcount` and `/tmp/nervecord-poll.cooldown` to reset. v021+ prevents this — network errors don't increment failcount. |
+| `Invalid config: gateway.bind` after running `openclaw agents add` | `openclaw agents add` overwrites `openclaw.json` and can corrupt gateway settings | Restore from backup: `cp ~/.openclaw/openclaw.json.bak ~/.openclaw/openclaw.json && openclaw gateway restart`. Always check `cat ~/.openclaw/openclaw.json` after creating a new agent. |
 | `Unknown model: anthropic/claude-sonnet-4` | Short model name | Use full version: `anthropic/claude-sonnet-4-20250514` |
 | `No API key found for provider "anthropic"` | Cron agent missing auth | Copy auth-profiles.json: `cp ~/.openclaw/agents/<your-agent>/agent/auth-profiles.json ~/.openclaw/agents/main/agent/auth-profiles.json` |

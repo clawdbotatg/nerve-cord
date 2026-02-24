@@ -69,8 +69,8 @@ function post(url, data, headers = {}) {
 const fs = require('fs');
 const LOCK_FILE = '/tmp/nervecord-poll.lock';
 const COOLDOWN_FILE = '/tmp/nervecord-poll.cooldown';
-const COOLDOWN_MS_BASE = 120000; // 2 min base cooldown after failure
-const COOLDOWN_MS_MAX = 900000; // 15 min max cooldown
+const COOLDOWN_MS_BASE = 60000;  // 1 min base cooldown after failure
+const COOLDOWN_MS_MAX = 120000;  // 2 min max — never back off longer than this
 const FAIL_COUNT_FILE = '/tmp/nervecord-poll.failcount';
 
 // Check if the nerve-cord server is reachable before doing anything.
@@ -144,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 026, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 027, openclaw: ${ver}`);
     return true;
   }
 
@@ -207,7 +207,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '026', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '027', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
@@ -231,21 +231,11 @@ async function main() {
 
   if (!actionable.length) return; // Empty inbox — zero cost
 
-  // Don't overlap — if an agent is already running, skip this cycle
-  if (isLocked()) {
-    return;
-  }
-
-  // Don't hammer API after failures — respect cooldown
-  if (isInCooldown()) {
-    return;
-  }
-
   console.log(`[${new Date().toISOString()}] ${actionable.length} message(s) pending, processing...`);
 
   // ====== MARK ALL MESSAGES SEEN IMMEDIATELY ======
-  // Do this BEFORE calling the agent so messages never get stuck in pending forever.
-  // Even if the agent crashes, the message is already seen — no infinite re-delivery.
+  // Do this FIRST — before lock/cooldown checks — so messages NEVER get stuck
+  // in pending regardless of what happens next. This is unconditional.
   for (const m of actionable) {
     try {
       await post(`${NERVE_SERVER}/messages/${m.id}/seen`, {}, { Authorization: `Bearer ${NERVE_TOKEN}` });
@@ -294,6 +284,16 @@ async function main() {
 
   if (!nonAck.length || !aiMessages.length) {
     // Everything was handled by builtins or dropped as acks — no AI needed
+    return;
+  }
+
+  // ====== GATE: lock + cooldown — only blocks AI, not mark-seen or builtins ======
+  if (isLocked()) {
+    console.log(`[${new Date().toISOString()}] Agent locked (already running), skipping AI for this cycle`);
+    return;
+  }
+  if (isInCooldown()) {
+    console.log(`[${new Date().toISOString()}] In cooldown, skipping AI for this cycle`);
     return;
   }
 
