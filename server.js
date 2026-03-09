@@ -29,6 +29,9 @@ const LOG_DIR = path.join(DATA_DIR, 'log');
 const PRIO_FILE = path.join(DATA_DIR, 'priorities.json');
 const SUGGESTIONS_FILE = path.join(DATA_DIR, 'suggestions.json');
 const PROJECTS_FILE = path.join(DATA_DIR, 'projects.json');
+const FILES_DIR = path.join(DATA_DIR, 'files');
+const FILES_META_FILE = path.join(DATA_DIR, 'files-meta.json');
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24h
 const LARVA_EXPIRY_MS = 60 * 60 * 1000; // 1h — larvae expire after no heartbeat
 const SAVE_INTERVAL = 30_000; // 30s
@@ -42,6 +45,7 @@ let priorities = []; // ordered array of { text, setBy, setAt }
 let suggestions = []; // community suggestions: { id, title, body, from, created }
 let larvae = new Map(); // name -> { name, task, status, registered, lastSeen, ip }
 let projects = []; // { id, name, status, repo, url, contract, chain, description, metadata, nextSteps, createdBy, created, updated }
+let filesMeta = []; // { id, filename, size, mimeType, uploadedBy, uploadedAt, downloadUrl }
 
 // --- Activity Log (daily files) ---
 function logDateKey(isoStr) { return isoStr.slice(0, 10); } // YYYY-MM-DD
@@ -96,6 +100,109 @@ function deleteLogEntry(id) {
   return false;
 }
 
+// --- Multipart Parser ---
+function readRawBody(req, maxSize) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', c => {
+      size += c.length;
+      if (size > maxSize) { req.destroy(); reject(new Error('file too large')); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function parseMultipart(buffer, contentType) {
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^\s;]+))/);
+  if (!boundaryMatch) throw new Error('no boundary in content-type');
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+  const boundaryBuf = Buffer.from('--' + boundary);
+  const parts = {};
+
+  // Find all boundary positions
+  const positions = [];
+  let searchFrom = 0;
+  while (true) {
+    const idx = buffer.indexOf(boundaryBuf, searchFrom);
+    if (idx === -1) break;
+    positions.push(idx);
+    searchFrom = idx + boundaryBuf.length;
+  }
+
+  for (let i = 0; i < positions.length - 1; i++) {
+    const start = positions[i] + boundaryBuf.length;
+    const end = positions[i + 1];
+    // Skip the CRLF after boundary marker
+    let partStart = start;
+    if (buffer[partStart] === 0x0d && buffer[partStart + 1] === 0x0a) partStart += 2;
+    else if (buffer[partStart] === 0x0a) partStart += 1;
+    // Check for closing boundary (--boundary--)
+    if (buffer[start] === 0x2d && buffer[start + 1] === 0x2d) continue;
+
+    const partBuf = buffer.slice(partStart, end);
+    // Split headers from body at double CRLF
+    const headerEndCRLF = partBuf.indexOf('\r\n\r\n');
+    const headerEndLF = partBuf.indexOf('\n\n');
+    let headerEnd, bodyOffset;
+    if (headerEndCRLF !== -1 && (headerEndLF === -1 || headerEndCRLF < headerEndLF)) {
+      headerEnd = headerEndCRLF;
+      bodyOffset = headerEnd + 4;
+    } else if (headerEndLF !== -1) {
+      headerEnd = headerEndLF;
+      bodyOffset = headerEnd + 2;
+    } else {
+      continue;
+    }
+
+    const headerStr = partBuf.slice(0, headerEnd).toString('utf8');
+    let body = partBuf.slice(bodyOffset);
+    // Trim trailing CRLF before next boundary
+    if (body.length >= 2 && body[body.length - 2] === 0x0d && body[body.length - 1] === 0x0a) {
+      body = body.slice(0, body.length - 2);
+    } else if (body.length >= 1 && body[body.length - 1] === 0x0a) {
+      body = body.slice(0, body.length - 1);
+    }
+
+    // Parse Content-Disposition
+    const nameMatch = headerStr.match(/name="([^"]+)"/);
+    if (!nameMatch) continue;
+    const fieldName = nameMatch[1];
+    const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+    const contentTypeMatch = headerStr.match(/Content-Type:\s*(.+)/i);
+
+    if (filenameMatch) {
+      parts[fieldName] = {
+        filename: filenameMatch[1],
+        contentType: contentTypeMatch ? contentTypeMatch[1].trim() : 'application/octet-stream',
+        data: body,
+      };
+    } else {
+      parts[fieldName] = body.toString('utf8');
+    }
+  }
+  return parts;
+}
+
+// --- MIME type helper ---
+function guessMimeType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const types = {
+    '.txt': 'text/plain', '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
+    '.json': 'application/json', '.xml': 'application/xml', '.csv': 'text/csv',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+    '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon',
+    '.pdf': 'application/pdf', '.zip': 'application/zip', '.gz': 'application/gzip',
+    '.tar': 'application/x-tar', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+    '.mp4': 'video/mp4', '.webm': 'video/webm', '.md': 'text/markdown',
+    '.wasm': 'application/wasm', '.ttf': 'font/ttf', '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+  };
+  return types[ext] || 'application/octet-stream';
+}
+
 function load() {
   try {
     if (fs.existsSync(DATA_FILE)) {
@@ -126,6 +233,12 @@ function load() {
       projects = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8'));
       console.log(`Loaded ${projects.length} projects from disk`);
     }
+    if (fs.existsSync(FILES_META_FILE)) {
+      filesMeta = JSON.parse(fs.readFileSync(FILES_META_FILE, 'utf8'));
+      console.log(`Loaded ${filesMeta.length} file metadata entries from disk`);
+    }
+    // Ensure files directory exists
+    fs.mkdirSync(FILES_DIR, { recursive: true });
   } catch (e) { console.error('Load error:', e.message); }
 }
 
@@ -137,6 +250,7 @@ function save() {
     fs.writeFileSync(PRIO_FILE, JSON.stringify(priorities, null, 2));
     fs.writeFileSync(SUGGESTIONS_FILE, JSON.stringify(suggestions, null, 2));
     fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
+    fs.writeFileSync(FILES_META_FILE, JSON.stringify(filesMeta, null, 2));
   } catch (e) { console.error('Save error:', e.message); }
 }
 
@@ -444,6 +558,31 @@ const server = http.createServer(async (req, res) => {
     })()}
   </div>
 
+  <div class="section">
+    <h2>📁 Shared Files</h2>
+    ${(() => {
+      if (!filesMeta.length) return '<div style="color:#666;padding:4px 0">No files uploaded yet</div>';
+      const recentFiles = [...filesMeta].sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt)).slice(0, 10);
+      const formatSize = (bytes) => {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      };
+      return '<div style="margin-bottom:8px;color:#8b949e;font-size:13px">' + filesMeta.length + ' file' + (filesMeta.length !== 1 ? 's' : '') + ' shared</div>' +
+        '<table><tr><th>File</th><th>Size</th><th>From</th><th>Uploaded</th></tr>' +
+        recentFiles.map(f => {
+          const uploadTime = ago(f.uploadedAt);
+          return '<tr>' +
+            '<td><a href="' + f.downloadUrl + '" style="color:#58a6ff;text-decoration:none" title="' + f.mimeType + '">📄 ' + f.filename + '</a></td>' +
+            '<td style="color:#8b949e;white-space:nowrap">' + formatSize(f.size) + '</td>' +
+            '<td style="font-weight:bold">🤖 ' + f.uploadedBy + '</td>' +
+            '<td style="color:#8b949e">' + uploadTime + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</table>';
+    })()}
+  </div>
+
   <div class="refresh">Auto-refreshes every 3s &middot; <a href="/stats?json">JSON API</a> &middot; <a href="/skill">SKILL.md</a></div>
 </div>
 <script>setTimeout(()=>location.reload(), 3000)</script>
@@ -481,6 +620,24 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       return res.end(script);
     } catch { return json(res, 500, { error: 'script not found' }); }
+  }
+
+  // --- File Download (public, no auth) ---
+  const fileDownloadMatch = p.match(/^\/files\/(file_[A-Za-z0-9_-]+)\/(.+)$/);
+  if (req.method === 'GET' && fileDownloadMatch) {
+    const fileId = fileDownloadMatch[1];
+    const meta = filesMeta.find(f => f.id === fileId);
+    if (!meta) return json(res, 404, { error: 'file not found' });
+    const filePath = path.join(FILES_DIR, fileId);
+    if (!fs.existsSync(filePath)) return json(res, 404, { error: 'file data not found' });
+    const stat = fs.statSync(filePath);
+    res.writeHead(200, {
+      'Content-Type': meta.mimeType || 'application/octet-stream',
+      'Content-Length': stat.size,
+      'Content-Disposition': `inline; filename="${meta.filename}"`,
+    });
+    fs.createReadStream(filePath).pipe(res);
+    return;
   }
 
   // --- Heartbeat (public read, auth write) ---
@@ -1010,6 +1167,65 @@ const server = http.createServer(async (req, res) => {
     const idx = projects.findIndex(p => p.id === projMatch[1]);
     if (idx === -1) return json(res, 404, { error: 'project not found' });
     const removed = projects.splice(idx, 1)[0];
+    save();
+    return json(res, 200, { deleted: removed });
+  }
+
+  // --- Files ---
+
+  // POST /files — upload a file (full token only, multipart/form-data)
+  if (req.method === 'POST' && p === '/files') {
+    if (authLevel !== 'full') return json(res, 403, { error: 'full token required for file upload' });
+    const ct = req.headers['content-type'] || '';
+    if (!ct.includes('multipart/form-data')) return json(res, 400, { error: 'content-type must be multipart/form-data' });
+    try {
+      const rawBody = await readRawBody(req, MAX_FILE_SIZE);
+      const parts = parseMultipart(rawBody, ct);
+      if (!parts.file || !parts.file.data) return json(res, 400, { error: 'file field required' });
+      const uploaderName = parts.from || 'unknown';
+      const fileId = `file_${nanoid(12)}`;
+      const filename = parts.file.filename || 'upload';
+      const mimeType = parts.file.contentType || guessMimeType(filename);
+      // Write file to disk
+      fs.mkdirSync(FILES_DIR, { recursive: true });
+      fs.writeFileSync(path.join(FILES_DIR, fileId), parts.file.data);
+      const meta = {
+        id: fileId,
+        filename,
+        size: parts.file.data.length,
+        mimeType,
+        uploadedBy: uploaderName,
+        uploadedAt: new Date().toISOString(),
+        downloadUrl: `/files/${fileId}/${encodeURIComponent(filename)}`,
+      };
+      filesMeta.push(meta);
+      save();
+      return json(res, 201, meta);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+
+  // GET /files — list uploaded files (auth required)
+  if (req.method === 'GET' && p === '/files') {
+    let results = [...filesMeta];
+    const from = url.searchParams.get('from');
+    if (from) results = results.filter(f => f.uploadedBy === from);
+    results.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+    return json(res, 200, results);
+  }
+
+  // DELETE /files/:id — delete a file (full token or uploader)
+  const fileDelMatch = p.match(/^\/files\/(file_[A-Za-z0-9_-]+)$/);
+  if (req.method === 'DELETE' && fileDelMatch) {
+    const fileId = fileDelMatch[1];
+    const idx = filesMeta.findIndex(f => f.id === fileId);
+    if (idx === -1) return json(res, 404, { error: 'file not found' });
+    // full token can delete any file; otherwise check if the request includes the uploader identity
+    // Since we can't know the caller's bot name from token alone, full token is sufficient for delete
+    if (authLevel !== 'full') return json(res, 403, { error: 'full token required for file deletion' });
+    const removed = filesMeta.splice(idx, 1)[0];
+    // Remove file from disk
+    const filePath = path.join(FILES_DIR, fileId);
+    try { fs.unlinkSync(filePath); } catch {}
     save();
     return json(res, 200, { deleted: removed });
   }
