@@ -144,7 +144,7 @@ function tryBuiltinCommand(msg) {
   if (/^(ping|alive\??|online\??|status\??)$/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 031, openclaw: ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME} online. skillVersion: 032, openclaw: ${ver}`);
     return true;
   }
 
@@ -162,7 +162,7 @@ function tryBuiltinCommand(msg) {
   if (/\b(version|skill version|what version)\b/.test(b)) {
     let ver = 'unknown';
     try { ver = execSync(`PATH=${NODE_BIN}:$PATH openclaw --version`, { encoding: 'utf8', timeout: 5000 }).trim(); } catch {}
-    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 031, openclaw ${ver}`);
+    sendReply(msg.from, msg.subject, `${NERVE_BOTNAME}: skillVersion 032, openclaw ${ver}`);
     return true;
   }
 
@@ -214,7 +214,7 @@ async function main() {
   }
 
   // Heartbeat — let the server know we're alive (fire and forget)
-  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '031', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
+  post(`${NERVE_SERVER}/heartbeat`, { name: NERVE_BOTNAME, skillVersion: '032', version: main._oclawVersion }, { Authorization: `Bearer ${NERVE_TOKEN}` }).catch(() => {});
 
   // Check for pending messages
   const url = `${NERVE_SERVER}/messages?to=${NERVE_BOTNAME}&status=pending`;
